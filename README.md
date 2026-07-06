@@ -44,7 +44,13 @@ On terminals ≥95 columns wide the TUI shows a split view: the session list on 
 
 ### Running sessions
 
-A colored dot marks sessions that are **currently running**: 🟢 idle · 🟠 busy · 🔴 waiting on input. The status bar shows a live count.
+A marker in the left gutter shows sessions that are **currently running**, encoded by both shape and color so it stays legible under red-green color blindness (the palette avoids the green/red axis):
+
+- `●` blue — idle but alive
+- `◆` orange — busy (working)
+- `▲` magenta — waiting on your input
+
+The status bar shows a per-status breakdown (e.g. `●11 ◆2 ▲2 live`), which also serves as a legend, and the inspect card spells the status out in words.
 
 Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.json` (which records the resolved session id, cwd, and status), drops stale entries whose process has exited, and walks the process's parents through `/proc` to find its tmux pane. Pressing `w` on a live session runs `tmux switch-client`/`select-window` to bring that pane to the foreground — the browser keeps running in its own pane. This works when the browser itself is running inside tmux.
 

@@ -574,7 +574,9 @@ func (m Model) viewInspect() string {
 			loc = fmt.Sprintf("tmux %s (%s)", ls.TmuxWindow, ls.TmuxLabel)
 			footer = "enter resume · w switch to tmux · any other key to close"
 		}
-		lines = append(lines, row("running", fmt.Sprintf("%s · pid %d · %s", ls.Status, ls.PID, loc)))
+		glyph, style := liveMarker(ls.Status)
+		lines = append(lines, row("running", fmt.Sprintf("%s %s · pid %d · %s",
+			style.Render(glyph), ls.Status, ls.PID, loc)))
 	}
 	lines = append(lines, "", styleStatus.Render(footer))
 	box := lipgloss.NewStyle().
@@ -635,24 +637,31 @@ func (m Model) viewDetail() string {
 	return head + "\n" + m.detail.View() + "\n" + foot
 }
 
-// liveCell renders the one-column running indicator for a session: a
-// dot colored by status (busy/waiting/idle), or a blank when the
-// session isn't running.
+// liveMarker returns the glyph and style for a running-session status.
+// Status is encoded redundantly by both shape and color so it stays
+// legible under red-green color blindness: the palette avoids the
+// green/red axis (blue / orange / magenta) and each status has a
+// distinct shape, so color is never the only cue.
+func liveMarker(status string) (string, lipgloss.Style) {
+	switch status {
+	case "busy": // working
+		return "◆", lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange diamond
+	case "waiting": // needs user input
+		return "▲", lipgloss.NewStyle().Foreground(lipgloss.Color("165")) // magenta triangle
+	default: // idle but alive
+		return "●", lipgloss.NewStyle().Foreground(lipgloss.Color("33")) // blue circle
+	}
+}
+
+// liveCell renders the one-column running indicator for a row, or a
+// blank when the session isn't running.
 func (m Model) liveCell(id string) string {
 	ls, ok := m.live[id]
 	if !ok {
 		return " "
 	}
-	var c lipgloss.Color
-	switch ls.Status {
-	case "busy":
-		c = lipgloss.Color("214") // orange: actively working
-	case "waiting":
-		c = lipgloss.Color("205") // pink: waiting on the user
-	default:
-		c = lipgloss.Color("42") // green: idle but alive
-	}
-	return lipgloss.NewStyle().Foreground(c).Render("●")
+	glyph, style := liveMarker(ls.Status)
+	return style.Render(glyph)
 }
 
 func (m Model) viewList() string {
@@ -782,8 +791,31 @@ func (m Model) viewList() string {
 		b.WriteString(styleStatus.Render(fmt.Sprintf(" content:%q · %d sessions · %d matches  ·  enter resume · esc clear · s search again", m.contentQuery, len(m.filtered), total)))
 	default:
 		n := fmt.Sprintf(" %d sessions", len(m.filtered))
-		if live := len(m.live); live > 0 {
-			n += fmt.Sprintf(" · %s %d live", lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("●"), live)
+		if len(m.live) > 0 {
+			// Per-status breakdown; doubles as a legend for the row dots.
+			var idle, busy, waiting int
+			for _, ls := range m.live {
+				switch ls.Status {
+				case "busy":
+					busy++
+				case "waiting":
+					waiting++
+				default:
+					idle++
+				}
+			}
+			var parts []string
+			add := func(status string, cnt int) {
+				if cnt == 0 {
+					return
+				}
+				g, st := liveMarker(status)
+				parts = append(parts, fmt.Sprintf("%s%d", st.Render(g), cnt))
+			}
+			add("idle", idle)
+			add("busy", busy)
+			add("waiting", waiting)
+			n += " · " + strings.Join(parts, " ") + " live"
 		}
 		if m.status != "" {
 			n += " · " + m.status
