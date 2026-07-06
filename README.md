@@ -33,7 +33,8 @@ On terminals ≥95 columns wide the TUI shows a split view: the session list on 
 | `↑/↓` `j/k` | move selection |
 | `enter` | resume selected session (`claude --resume <id>` in its original cwd; exiting Claude returns to the browser) |
 | `v` `l` `→` | view transcript |
-| `i` | inspect: session id, start/end dates, duration, message/tool/token counts, file size |
+| `i` | inspect: session id, start/end dates, duration, message/tool/token counts, running status, file size |
+| `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
 | `b` | back up sessions now |
@@ -41,7 +42,18 @@ On terminals ≥95 columns wide the TUI shows a split view: the session list on 
 | `r` | rescan |
 | `q` | quit |
 
-Set `CSB_CLAUDE_BIN` to override the `claude` binary used for resuming.
+### Running sessions
+
+A colored dot marks sessions that are **currently running**: 🟢 idle · 🟠 busy · 🔴 waiting on input. The status bar shows a live count.
+
+Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.json` (which records the resolved session id, cwd, and status), drops stale entries whose process has exited, and walks the process's parents through `/proc` to find its tmux pane. Pressing `w` on a live session runs `tmux switch-client`/`select-window` to bring that pane to the foreground — the browser keeps running in its own pane. This works when the browser itself is running inside tmux.
+
+### Environment
+
+| Variable | Effect |
+|----------|--------|
+| `CSB_CLAUDE_BIN` | `claude` binary used for resuming (default `claude`) |
+| `CSB_TMUX_SOCKET` | tmux server socket (`tmux -L <name>`) for detection and switching; default server otherwise |
 
 ## Backups
 
@@ -80,8 +92,10 @@ go test ./...        # unit tests: parsing, backup sync/restore, search (rg + Go
 test/tui_test.sh     # end-to-end TUI tests driven through tmux (requires tmux)
 ```
 
-The Go tests build their own fixtures in temp dirs; `test/tui_test.sh` builds the binary, runs it against a throwaway fixture projects dir with `claude` stubbed via `CSB_CLAUDE_BIN`, and drives real keystrokes to assert on rendered output (split-pane preview, filter, inspect, content search, resume hand-off). Neither suite touches your real `~/.claude/projects`.
+The Go tests build their own fixtures in temp dirs — including the running-session detection (fake registry via `CSB_SESSIONS_DIR`, injected process/pane data) and the tmux switch, which runs against a private throwaway tmux server via `CSB_TMUX_SOCKET` so it can never disturb your own session. `test/tui_test.sh` builds the binary, runs it against a throwaway fixture projects dir with `claude` stubbed via `CSB_CLAUDE_BIN`, and drives real keystrokes to assert on rendered output (split-pane preview, filter, inspect, content search, resume hand-off). Neither suite touches your real `~/.claude/projects` or tmux server.
 
 ## How it works
 
 Each `.jsonl` line is a typed record (`user`, `assistant`, `ai-title`, `last-prompt`, …). The scanner does a partial JSON decode of every line to extract the title, cwd, git branch, model, timestamps, and human/assistant message counts, skipping meta records, sidechains, and tool results. The transcript view re-parses the file into user prompts, assistant text, and one-line tool-call summaries.
+
+Running-session detection is separate: Claude Code maintains `~/.claude/sessions/<pid>.json` for each live process, giving an exact session id regardless of how it was launched. The browser reads that registry, validates each pid against `/proc` (dropping stale files and guarding pid reuse), and walks parent pids until it reaches a tmux pane to locate the window.

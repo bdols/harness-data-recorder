@@ -18,6 +18,7 @@ import (
 	"github.com/muesli/reflow/wrap"
 
 	"github.com/bdols/claude-session-browser/internal/backup"
+	"github.com/bdols/claude-session-browser/internal/live"
 	"github.com/bdols/claude-session-browser/internal/session"
 )
 
@@ -65,6 +66,10 @@ type Model struct {
 	detail   viewport.Model
 	detailOf *session.Session
 
+	// live holds currently-running sessions keyed by session id,
+	// refreshed alongside every scan.
+	live map[string]live.Session
+
 	// transcripts caches parsed session files for the preview pane,
 	// keyed by file path; cleared on every rescan.
 	transcripts map[string][]session.Entry
@@ -84,7 +89,7 @@ func New(root, backupDir string) Model {
 	si.Placeholder = "search all session content…"
 	si.Prompt = "search: "
 	si.CharLimit = 256
-	return Model{root: root, backupDir: backupDir, filter: ti, search: si, transcripts: map[string][]session.Entry{}}
+	return Model{root: root, backupDir: backupDir, filter: ti, search: si, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -93,6 +98,13 @@ type scannedMsg struct {
 }
 
 type resumedMsg struct{ err error }
+
+type liveMsg struct{ sessions map[string]live.Session }
+
+type switchedMsg struct {
+	window string
+	err    error
+}
 
 type searchedMsg struct {
 	query   string
@@ -107,11 +119,17 @@ type backedUpMsg struct {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{scanCmd(m.root)}
+	cmds := []tea.Cmd{scanCmd(m.root), liveCmd()}
 	if m.backupDir != "" {
 		cmds = append(cmds, backupCmd(m.root, m.backupDir))
 	}
 	return tea.Batch(cmds...)
+}
+
+func liveCmd() tea.Cmd {
+	return func() tea.Msg {
+		return liveMsg{sessions: live.Scan()}
+	}
 }
 
 func backupCmd(root, dest string) tea.Cmd {
@@ -155,6 +173,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = msg.sessions
 		m.transcripts = map[string][]session.Entry{}
 		m.applyFilter()
+		return m, liveCmd()
+
+	case liveMsg:
+		m.live = msg.sessions
+		return m, nil
+
+	case switchedMsg:
+		if msg.err != nil {
+			m.err = "tmux: " + msg.err.Error()
+		} else {
+			m.status = "switched to tmux " + msg.window
+		}
 		return m, nil
 
 	case searchedMsg:
@@ -275,6 +305,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.mode = modeList
 			return m.resume()
+		case "w":
+			return m.switchTmux()
 		default: // any other key closes
 			m.mode = modeList
 			return m, nil
@@ -290,6 +322,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeInspect
 			m.detailOf = nil
 			return m, nil
+		case "w":
+			return m.switchTmux()
 		case "enter":
 			return m.resume()
 		case "ctrl+c":
@@ -340,7 +374,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			m.status = "rescanning…"
-			return m, scanCmd(m.root)
+			return m, tea.Batch(scanCmd(m.root), liveCmd())
+		case "w":
+			return m.switchTmux()
 		case "b":
 			if m.backupDir != "" {
 				m.status = "backing up…"
@@ -400,6 +436,36 @@ func (m Model) resume() (tea.Model, tea.Cmd) {
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {
 		return resumedMsg{err: err}
 	})
+}
+
+// switchTmux jumps the attached tmux client to the pane running the
+// selected session, if it is live and inside tmux.
+func (m Model) switchTmux() (tea.Model, tea.Cmd) {
+	s := m.selected()
+	if m.mode == modeDetail && m.detailOf != nil {
+		s = m.detailOf
+	}
+	m.mode = modeList
+	if s == nil {
+		return m, nil
+	}
+	ls, ok := m.live[s.ID]
+	if !ok {
+		m.err = "session is not running"
+		return m, nil
+	}
+	if ls.TmuxPane == "" {
+		m.err = "session is running but not inside tmux"
+		return m, nil
+	}
+	if !live.InTmux() {
+		m.err = "run the browser inside tmux to switch windows"
+		return m, nil
+	}
+	window := ls.TmuxWindow
+	return m, func() tea.Msg {
+		return switchedMsg{window: window, err: live.SwitchTmux(ls.TmuxPane)}
+	}
 }
 
 func (m *Model) applyFilter() {
@@ -500,9 +566,17 @@ func (m Model) viewInspect() string {
 		row("cli version", orDash(s.Version)),
 		row("file", shortPath(s.Path)),
 		row("size", humanSize(s.Size)),
-		"",
-		styleStatus.Render("enter resume · any other key to close"),
 	}
+	footer := "enter resume · any other key to close"
+	if ls, ok := m.live[s.ID]; ok {
+		loc := "not in tmux"
+		if ls.TmuxWindow != "" {
+			loc = fmt.Sprintf("tmux %s (%s)", ls.TmuxWindow, ls.TmuxLabel)
+			footer = "enter resume · w switch to tmux · any other key to close"
+		}
+		lines = append(lines, row("running", fmt.Sprintf("%s · pid %d · %s", ls.Status, ls.PID, loc)))
+	}
+	lines = append(lines, "", styleStatus.Render(footer))
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("62")).
@@ -561,6 +635,26 @@ func (m Model) viewDetail() string {
 	return head + "\n" + m.detail.View() + "\n" + foot
 }
 
+// liveCell renders the one-column running indicator for a session: a
+// dot colored by status (busy/waiting/idle), or a blank when the
+// session isn't running.
+func (m Model) liveCell(id string) string {
+	ls, ok := m.live[id]
+	if !ok {
+		return " "
+	}
+	var c lipgloss.Color
+	switch ls.Status {
+	case "busy":
+		c = lipgloss.Color("214") // orange: actively working
+	case "waiting":
+		c = lipgloss.Color("205") // pink: waiting on the user
+	default:
+		c = lipgloss.Color("42") // green: idle but alive
+	}
+	return lipgloss.NewStyle().Foreground(c).Render("●")
+}
+
 func (m Model) viewList() string {
 	// Wide terminals split into a session list (left) and a live
 	// transcript preview of the selection (right).
@@ -602,24 +696,26 @@ func (m Model) viewList() string {
 		end = len(m.filtered)
 	}
 
+	// Rows carry a leading one-column live indicator; the header gets a
+	// matching blank column so titles stay aligned.
 	leftLines := make([]string, 0, rows+1)
 	if previewOn {
-		leftLines = append(leftLines, styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s ",
+		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s ",
 			timeW, "AGE", projW, "PROJECT", titleW, "TITLE")))
 	} else {
-		leftLines = append(leftLines, styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s  %*s  %-*s ",
+		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s  %*s  %-*s ",
 			timeW, "AGE", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")))
 	}
 	for i := start; i < end; i++ {
 		s := m.filtered[i]
-		var row string
+		var body string
 		if previewOn {
-			row = fmt.Sprintf(" %*s  %-*s  %-*s ",
+			body = fmt.Sprintf(" %*s  %-*s  %-*s ",
 				timeW, relTime(s.LastTime),
 				projW, truncate(projName(s.CWD), projW),
 				titleW, truncate(s.Title, titleW))
 		} else {
-			row = fmt.Sprintf(" %*s  %-*s  %-*s  %*d  %-*s ",
+			body = fmt.Sprintf(" %*s  %-*s  %-*s  %*d  %-*s ",
 				timeW, relTime(s.LastTime),
 				projW, truncate(projName(s.CWD), projW),
 				titleW, truncate(s.Title, titleW),
@@ -627,9 +723,9 @@ func (m Model) viewList() string {
 				modelW, truncate(shortModel(s.Model), modelW))
 		}
 		if i == m.cursor {
-			row = styleSelected.Render(row)
+			body = styleSelected.Render(body)
 		}
-		leftLines = append(leftLines, row)
+		leftLines = append(leftLines, m.liveCell(s.ID)+body)
 	}
 	blank := strings.Repeat(" ", leftW)
 	for len(leftLines) < rows+1 {
@@ -686,10 +782,13 @@ func (m Model) viewList() string {
 		b.WriteString(styleStatus.Render(fmt.Sprintf(" content:%q · %d sessions · %d matches  ·  enter resume · esc clear · s search again", m.contentQuery, len(m.filtered), total)))
 	default:
 		n := fmt.Sprintf(" %d sessions", len(m.filtered))
+		if live := len(m.live); live > 0 {
+			n += fmt.Sprintf(" · %s %d live", lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("●"), live)
+		}
 		if m.status != "" {
 			n += " · " + m.status
 		}
-		b.WriteString(styleStatus.Render(n + "  ·  enter resume · v view · i inspect · / filter · s search · b backup · d delete · r rescan · q quit"))
+		b.WriteString(styleStatus.Render(n + "  ·  enter resume · v view · i inspect · w tmux · / filter · s search · b backup · d del · r rescan · q quit"))
 	}
 	return b.String()
 }
