@@ -42,6 +42,8 @@ On terminals ≥95 columns wide the TUI shows a split view: the session list on 
 | `r` | rescan |
 | `q` | quit |
 
+The key bar sits on its own line at the bottom, so a search or filter readout never hides it — `i`, `w`, and the other actions stay listed and usable while a content search or filter is active.
+
 ### Running sessions
 
 A marker in the left gutter shows sessions that are **currently running**, encoded by both shape and color so it stays legible under red-green color blindness (the palette avoids the green/red axis):

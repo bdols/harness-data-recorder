@@ -175,6 +175,14 @@ wait_for "matches" 5
 assert_present "search reports match count" "3 matches"
 assert_present "search keeps matching session" "Alpha Session"
 assert_absent "search drops non-matching session" "Beta Session"
+# The key bar must stay visible while a search is active — the search
+# readout on its own line must not hide the remaining actions.
+assert_present "key bar visible during search" "i inspect"
+# …and those keys must still work: inspect opens on the matched session.
+send "i"
+wait_for "session id" 3
+assert_present "inspect works after search" "sess-alpha"
+send Escape
 
 echo "resume hand-off (enter)"
 launch # alpha selected at top

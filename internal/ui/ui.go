@@ -43,6 +43,12 @@ var (
 	styleStatus   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "246"})
 )
 
+// keyBar lists the modeList bindings. It lives on its own line so
+// transient status (search results, filters, errors) never hides the
+// keys that remain available — i inspect, w tmux, etc. all still work
+// while a search or filter is active.
+const keyBar = "enter resume · v view · i inspect · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+
 // Model is the top-level bubbletea model.
 type Model struct {
 	root      string
@@ -692,7 +698,7 @@ func (m Model) viewList() string {
 		titleW = 10
 	}
 
-	rows := m.height - 4 // header + context + status lines
+	rows := m.height - 5 // header + context + status + key-bar lines
 	if rows < 1 {
 		rows = 1
 	}
@@ -762,7 +768,9 @@ func (m Model) viewList() string {
 		}
 	}
 
-	// Bottom: context line for selection + status/help.
+	// Bottom: context line for selection, a transient status line, and a
+	// persistent key bar (see keyBar) so available actions never get
+	// hidden behind a search or filter readout.
 	var ctx string
 	if s := m.selected(); s != nil {
 		line := fmt.Sprintf(" %s · last: %s", s.CWD, firstLineOf(s.LastPrompt))
@@ -773,56 +781,85 @@ func (m Model) viewList() string {
 	}
 	b.WriteString(ctx + "\n")
 
+	status, help := m.statusAndHelp()
+	b.WriteString(status + "\n")
+	b.WriteString(help)
+	return b.String()
+}
+
+// statusAndHelp builds the two bottom lines. Modal states (typing a
+// filter/search, confirming a delete) own both lines and describe their
+// own keys; every other state shows transient status on the first line
+// and the full key bar on the second, so keys like i and w stay visible
+// and usable even while a content search or filter is active.
+func (m Model) statusAndHelp() (status, help string) {
 	switch {
 	case m.mode == modeConfirmDelete:
-		s := m.selected()
-		b.WriteString(styleError.Render(fmt.Sprintf(" delete session %s? (y/N)", s.ID)))
+		id := ""
+		if s := m.selected(); s != nil {
+			id = s.ID
+		}
+		return styleError.Render(fmt.Sprintf(" delete session %s?", id)),
+			styleStatus.Render(" y confirm · any other key cancel")
 	case m.searching:
-		b.WriteString(" " + m.search.View())
-	case m.filtering || m.filter.Value() != "":
-		b.WriteString(" " + m.filter.View())
+		return " " + m.search.View(),
+			styleStatus.Render(" enter search · esc cancel")
+	case m.filtering:
+		return " " + m.filter.View(),
+			styleStatus.Render(" type to filter · enter apply · esc clear")
+	}
+
+	switch {
 	case m.err != "":
-		b.WriteString(styleError.Render(" " + m.err))
+		status = styleError.Render(truncate(" "+m.err, m.width-1))
 	case m.contentQuery != "":
 		total := 0
 		for _, s := range m.filtered {
 			total += m.matches[s.Path]
 		}
-		b.WriteString(styleStatus.Render(fmt.Sprintf(" content:%q · %d sessions · %d matches  ·  enter resume · esc clear · s search again", m.contentQuery, len(m.filtered), total)))
+		status = styleStatus.Render(truncate(fmt.Sprintf(" content:%q · %d sessions · %d matches · esc clear", m.contentQuery, len(m.filtered), total), m.width-1))
+	case m.filter.Value() != "":
+		status = styleStatus.Render(truncate(fmt.Sprintf(" filter:%q · %d sessions · esc clear", m.filter.Value(), len(m.filtered)), m.width-1))
 	default:
-		n := fmt.Sprintf(" %d sessions", len(m.filtered))
-		if len(m.live) > 0 {
-			// Per-status breakdown; doubles as a legend for the row dots.
-			var idle, busy, waiting int
-			for _, ls := range m.live {
-				switch ls.Status {
-				case "busy":
-					busy++
-				case "waiting":
-					waiting++
-				default:
-					idle++
-				}
-			}
-			var parts []string
-			add := func(status string, cnt int) {
-				if cnt == 0 {
-					return
-				}
-				g, st := liveMarker(status)
-				parts = append(parts, fmt.Sprintf("%s%d", st.Render(g), cnt))
-			}
-			add("idle", idle)
-			add("busy", busy)
-			add("waiting", waiting)
-			n += " · " + strings.Join(parts, " ") + " live"
-		}
+		status = styleStatus.Render(fmt.Sprintf(" %d sessions", len(m.filtered))) + m.liveLegend()
 		if m.status != "" {
-			n += " · " + m.status
+			status += styleStatus.Render(" · " + truncate(m.status, m.width-1))
 		}
-		b.WriteString(styleStatus.Render(n + "  ·  enter resume · v view · i inspect · w tmux · / filter · s search · b backup · d del · r rescan · q quit"))
 	}
-	return b.String()
+	help = styleStatus.Render(" " + truncate(keyBar, m.width-2))
+	return status, help
+}
+
+// liveLegend renders the per-status breakdown of running sessions,
+// e.g. " · ●11 ◆2 ▲2 live", or "" when nothing is running. The glyphs
+// double as a legend for the row markers.
+func (m Model) liveLegend() string {
+	if len(m.live) == 0 {
+		return ""
+	}
+	var idle, busy, waiting int
+	for _, ls := range m.live {
+		switch ls.Status {
+		case "busy":
+			busy++
+		case "waiting":
+			waiting++
+		default:
+			idle++
+		}
+	}
+	var parts []string
+	add := func(status string, cnt int) {
+		if cnt == 0 {
+			return
+		}
+		g, st := liveMarker(status)
+		parts = append(parts, fmt.Sprintf("%s%d", st.Render(g), cnt))
+	}
+	add("idle", idle)
+	add("busy", busy)
+	add("waiting", waiting)
+	return styleStatus.Render(" · ") + strings.Join(parts, " ") + styleStatus.Render(" live")
 }
 
 // transcript returns cached parsed entries for a session file,
