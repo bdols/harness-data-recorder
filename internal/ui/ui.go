@@ -210,9 +210,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = "backup: " + msg.err.Error()
 		} else if msg.copied > 0 {
-			m.status = fmt.Sprintf("backed up %d of %d sessions", msg.copied, msg.total)
+			m.status = fmt.Sprintf("saved %d new session version(s)", msg.copied)
 		} else {
-			m.status = fmt.Sprintf("backup up to date (%d sessions)", msg.total)
+			m.status = fmt.Sprintf("backups current (%d sessions)", msg.total)
 		}
 		return m, nil
 
@@ -572,6 +572,24 @@ func (m Model) viewInspect() string {
 		row("cli version", orDash(s.Version)),
 		row("file", shortPath(s.Path)),
 		row("size", humanSize(s.Size)),
+	}
+	if m.backupDir != "" {
+		if vs := backup.Versions(m.backupDir, s.ID); len(vs) > 0 {
+			newest, largest := vs[len(vs)-1], vs[0]
+			for _, v := range vs {
+				if v.Size > largest.Size {
+					largest = v
+				}
+			}
+			desc := fmt.Sprintf("%d version(s) · newest %s (%s)",
+				len(vs), newest.Time.Local().Format("2006-01-02 15:04"), humanSize(newest.Size))
+			// If an older version holds more data, the newest is likely a
+			// truncation — flag the more-complete copy Restore would pick.
+			if largest.Size > newest.Size {
+				desc += fmt.Sprintf(" · largest %s ⚠", humanSize(largest.Size))
+			}
+			lines = append(lines, row("backups", desc))
+		}
 	}
 	footer := "enter resume · any other key to close"
 	if ls, ok := m.live[s.ID]; ok {

@@ -3,6 +3,7 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,52 @@ func TestSyncReCopiesChangedOnly(t *testing.T) {
 	}
 }
 
+// TestSyncLeavesNoTempFiles guards against the temp hard link that
+// updateCurrent creates leaking when a sync leaves the current file
+// pointing at the same version (POSIX rename is a no-op between hard
+// links to one inode). Repeated syncs must leave only the current file
+// and its versions.
+func TestSyncLeavesNoTempFiles(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	mt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	writeSession(t, root, "-proj", "s.jsonl", "body", mt)
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := Sync(root, dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stray []string
+	_ = filepath.Walk(dest, func(p string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() && !strings.HasSuffix(p, ".jsonl") {
+			stray = append(stray, p)
+		}
+		return nil
+	})
+	if len(stray) != 0 {
+		t.Errorf("stray non-.jsonl files left behind: %v", stray)
+	}
+
+	// The current flat file must be a hard link to the sole version, not
+	// a second independent copy.
+	fa, err := os.Stat(filepath.Join(dest, "-proj", "s.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs := Versions(dest, "s")
+	if len(vs) != 1 {
+		t.Fatalf("got %d versions, want 1", len(vs))
+	}
+	fv, err := os.Stat(vs[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(fa, fv) {
+		t.Error("current file is not hard-linked to its version")
+	}
+}
+
 func TestRestoreRoundTrip(t *testing.T) {
 	root, dest := t.TempDir(), t.TempDir()
 	mtime := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -131,6 +178,92 @@ func TestRestoreRoundTrip(t *testing.T) {
 	}
 	if string(got) != "session body" {
 		t.Errorf("restored content = %q, want original", got)
+	}
+}
+
+// TestTruncationKeepsRecoverableVersion is the regression test for the
+// failure that motivated versioning: a good backup existed, the source
+// was later truncated, a sync ran, and the truncation must NOT be able
+// to destroy the good copy. Restore must return the complete version.
+func TestTruncationKeepsRecoverableVersion(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	full := "line1\nline2\nline3\nline4\n"
+	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	path := writeSession(t, root, "-proj", "sid.jsonl", full, t0)
+
+	// First sync captures the full transcript.
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	// The source is truncated in place and its mtime advances, exactly as
+	// a real truncation looks. A second sync captures the truncated state.
+	if err := os.WriteFile(path, []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t1 := t0.Add(time.Hour)
+	if err := os.Chtimes(path, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both states are retained as versions.
+	if vs := Versions(dest, "sid"); len(vs) != 2 {
+		t.Fatalf("got %d versions, want 2 (full + truncated)", len(vs))
+	}
+
+	// The live file is gone; Restore must bring back the FULL version,
+	// not the truncated one that synced most recently.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Restore(dest, root, "sid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != full {
+		t.Errorf("restored truncated data %q, want full transcript %q", got, full)
+	}
+}
+
+// TestSyncMigratesLegacyFlatBackup guards the upgrade path: an existing
+// pre-versioning backup (a plain <id>.jsonl with no history) must be
+// seeded as a version before the current source is captured, so the
+// migration itself can't lose the old copy — even if the live source is
+// already truncated by the time the new code first runs.
+func TestSyncMigratesLegacyFlatBackup(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	good := "line1\nline2\nline3\n"
+
+	// A legacy flat backup sits in dest with no .versions dir.
+	writeSession(t, dest, "-proj", "sid.jsonl", good, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	// The live source has already been truncated.
+	writeSession(t, root, "-proj", "sid.jsonl", "line1\n", time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC))
+
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+	if vs := Versions(dest, "sid"); len(vs) != 2 {
+		t.Fatalf("got %d versions after migration, want 2 (legacy + truncated)", len(vs))
+	}
+
+	// The pre-existing good backup must still be recoverable.
+	if err := os.Remove(filepath.Join(root, "-proj", "sid.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Restore(dest, root, "sid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(restored)
+	if string(got) != good {
+		t.Errorf("migration lost the legacy backup: restored %q, want %q", got, good)
 	}
 }
 

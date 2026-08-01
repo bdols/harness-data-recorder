@@ -33,11 +33,15 @@ func main() {
 	}
 
 	if *restore != "" {
+		versions := backup.Versions(*backupDir, *restore)
 		dst, err := backup.Restore(*backupDir, *root, *restore)
 		if err != nil {
 			fatal(err)
 		}
 		fmt.Println("restored", dst)
+		if len(versions) > 1 {
+			fmt.Printf("(chose the most complete of %d stored versions)\n", len(versions))
+		}
 		return
 	}
 
@@ -46,7 +50,7 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("backed up %d of %d sessions to %s\n", copied, total, *backupDir)
+		fmt.Printf("saved %d new session version(s) across %d sessions to %s\n", copied, total, *backupDir)
 		return
 	}
 

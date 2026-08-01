@@ -65,17 +65,28 @@ Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.
 
 ## Backups
 
-Claude Code deletes session transcripts older than `cleanupPeriodDays` (default: **30 days**). The browser mirrors every session file to `~/.local/share/claude-session-browser/backups/` (or `$XDG_DATA_HOME/...`) automatically on every launch, so any session you've browsed at least once in 30 days survives the purge. Backups keep the projects-dir layout, preserve mtimes, are synced incrementally, and are never deleted by this tool.
+Claude Code deletes session transcripts older than `cleanupPeriodDays` (default: **30 days**). The browser keeps **versioned, append-only** copies under `~/.local/share/claude-session-browser/backups/` (or `$XDG_DATA_HOME/...`) automatically on every launch, so any session you've browsed at least once in 30 days survives the purge.
+
+Backups are **append-only**: each launch captures the session's current content as a new immutable version *only when it changed*, and versions are never overwritten or deleted. This is deliberate — a mirror that overwrites can propagate a truncated or corrupted source over a good backup and destroy it; a versioned store cannot. A truncation just lands as a smaller *new* version beside the good one.
+
+Layout, per session file:
+
+```
+<project>/<id>.jsonl            # "current" file (hard link to the newest version) — browsable via --root
+<project>/<id>.versions/        # append-only history, one file per distinct state
+    20260801T120000-ab12cd.jsonl
+    20260801T153000-9f0e11.jsonl
+```
 
 ```sh
 csb --backup                    # one-shot sync (for cron/systemd timers)
 csb --backup-dir /path          # alternate destination
 csb --no-auto-backup            # don't sync on TUI launch
 csb --root ~/.local/share/claude-session-browser/backups   # browse the backups themselves
-csb --restore <session-id>      # copy a pruned session back so --resume works again
+csb --restore <session-id>      # restore the most complete version so --resume works again
 ```
 
-`--restore` refuses to overwrite a session that still exists live. You can also raise `cleanupPeriodDays` in `~/.claude/settings.json` to keep the originals longer.
+`--restore` brings back the **most complete (largest) version**, so a later truncation can never mask the good copy, and it refuses to overwrite a session that still exists live. The inspect card (`i`) shows how many versions are stored and flags (`⚠`) when an older version holds more data than the newest — the sign of a truncated live file. Existing pre-versioning (flat) backups are migrated in place on the next sync: the old copy is seeded as version 1 before anything else is captured. You can also raise `cleanupPeriodDays` in `~/.claude/settings.json` to keep the originals longer.
 
 ## Remote sessions
 
