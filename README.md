@@ -26,12 +26,14 @@ csb --root /path    # scan an alternate projects dir (see Remote below)
 
 On terminals ≥95 columns wide the TUI shows a split view: the session list on the left and a live preview of the selected session's transcript tail on the right. Narrower terminals fall back to a full-width list.
 
+The list shows two time columns: **MODIFIED** (time since the last message — the sort key) and **CREATED** (time since the first message). Both are derived from record timestamps, not file mtime. The inspect card (`i`) shows the exact start/end timestamps and span.
+
 ### Keys
 
 | Key | Action |
 |-----|--------|
 | `↑/↓` `j/k` | move selection |
-| `enter` | resume selected session (`claude --resume <id>` in its original cwd; exiting Claude returns to the browser) |
+| `enter` | resume selected session (`claude --resume <id>` in its original cwd; exiting Claude returns to the browser). If the session isn't in Claude's live dir but a backup exists (e.g. it was reaped, or you're browsing backups), a dialog offers to restore it first, then resume |
 | `v` `l` `→` | view transcript |
 | `i` | inspect: session id, start/end dates, duration, message/tool/token counts, running status, file size |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |

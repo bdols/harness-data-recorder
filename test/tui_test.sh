@@ -143,6 +143,8 @@ echo "list + split-pane preview"
 launch
 assert_present "list shows both session titles" "Alpha Session"
 assert_present "list shows beta title" "Beta Session"
+assert_present "list shows MODIFIED column" "MODIFIED"
+assert_present "list shows CREATED column" "CREATED"
 # Alpha is selected by default; its transcript renders in the preview pane.
 assert_present "preview shows selected session transcript" "searching for needle"
 

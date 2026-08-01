@@ -61,11 +61,7 @@ func main() {
 		return
 	}
 
-	dir := *backupDir
-	if *noAutoBackup {
-		dir = ""
-	}
-	p := tea.NewProgram(ui.New(*root, dir), tea.WithAltScreen())
+	p := tea.NewProgram(ui.New(*root, *backupDir, !*noAutoBackup), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fatal(err)
 	}

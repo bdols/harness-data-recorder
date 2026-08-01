@@ -29,6 +29,7 @@ const (
 	modeDetail
 	modeConfirmDelete
 	modeInspect
+	modeConfirmRestore
 )
 
 var (
@@ -51,14 +52,15 @@ const keyBar = "enter resume · v view · i inspect · w tmux · / filter · s s
 
 // Model is the top-level bubbletea model.
 type Model struct {
-	root      string
-	backupDir string // empty disables backups
-	sessions  []session.Session
-	filtered  []session.Session
-	cursor    int
-	mode      mode
-	width     int
-	height    int
+	root       string
+	backupDir  string // where backups live; empty only if no home dir
+	autoBackup bool   // sync on launch (disabled by --no-auto-backup)
+	sessions   []session.Session
+	filtered   []session.Session
+	cursor     int
+	mode       mode
+	width      int
+	height     int
 
 	filter    textinput.Model
 	filtering bool
@@ -72,6 +74,9 @@ type Model struct {
 	detail   viewport.Model
 	detailOf *session.Session
 
+	// pending holds a session awaiting a restore-then-resume confirmation.
+	pending *session.Session
+
 	// live holds currently-running sessions keyed by session id,
 	// refreshed alongside every scan.
 	live map[string]live.Session
@@ -84,9 +89,10 @@ type Model struct {
 	err    string
 }
 
-// New builds the model. backupDir is where sessions are mirrored on
-// startup and on demand; pass "" to disable backups.
-func New(root, backupDir string) Model {
+// New builds the model. backupDir is where session versions are stored
+// (used for both backup and restore); autoBackup controls whether a sync
+// runs on launch.
+func New(root, backupDir string, autoBackup bool) Model {
 	ti := textinput.New()
 	ti.Placeholder = "filter…"
 	ti.Prompt = "/"
@@ -95,7 +101,7 @@ func New(root, backupDir string) Model {
 	si.Placeholder = "search all session content…"
 	si.Prompt = "search: "
 	si.CharLimit = 256
-	return Model{root: root, backupDir: backupDir, filter: ti, search: si, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
+	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup, filter: ti, search: si, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -126,7 +132,7 @@ type backedUpMsg struct {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{scanCmd(m.root), liveCmd()}
-	if m.backupDir != "" {
+	if m.autoBackup && m.backupDir != "" {
 		cmds = append(cmds, backupCmd(m.root, m.backupDir))
 	}
 	return tea.Batch(cmds...)
@@ -304,6 +310,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case modeConfirmRestore:
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "y", "Y":
+			s := m.pending
+			if s == nil {
+				m.mode = modeList
+				return m, nil
+			}
+			// Restore refuses to overwrite a live file, so the destination
+			// is guaranteed clear before we resume.
+			dst, err := backup.Restore(m.restoreDir(), session.DefaultRoot(), s.ID)
+			if err != nil {
+				m.mode = modeList
+				m.detailOf, m.pending = nil, nil
+				m.err = "restore: " + err.Error()
+				return m, nil
+			}
+			m.status = "restored " + filepath.Base(dst)
+			return m.launchClaude(s)
+		default: // any other key cancels
+			m.mode = modeList
+			m.detailOf, m.pending = nil, nil
+			m.status = "restore cancelled"
+			return m, nil
+		}
+
 	case modeInspect:
 		switch msg.String() {
 		case "ctrl+c":
@@ -388,7 +422,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "backing up…"
 				return m, backupCmd(m.root, m.backupDir)
 			}
-			m.status = "backups disabled (--no-auto-backup)"
+			m.status = "no backup location available"
 		case "d":
 			if m.selected() != nil {
 				m.mode = modeConfirmDelete
@@ -425,6 +459,22 @@ func (m Model) resume() (tea.Model, tea.Cmd) {
 	if s == nil {
 		return m, nil
 	}
+	// If the transcript isn't in Claude Code's own projects dir (we're
+	// browsing backups, or it was reaped) but a backup exists, confirm a
+	// restore before resuming rather than handing Claude a missing id.
+	if !liveExists(s) && len(backup.Versions(m.restoreDir(), s.ID)) > 0 {
+		m.pending = s
+		m.mode = modeConfirmRestore
+		return m, nil
+	}
+	return m.launchClaude(s)
+}
+
+// launchClaude resumes s via `claude --resume` in its original cwd. The
+// transcript is assumed present in Claude's projects dir by now.
+func (m Model) launchClaude(s *session.Session) (tea.Model, tea.Cmd) {
+	m.mode = modeList
+	m.detailOf, m.pending = nil, nil
 	dir := s.CWD
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		m.err = fmt.Sprintf("cwd %s no longer exists", dir)
@@ -436,12 +486,30 @@ func (m Model) resume() (tea.Model, tea.Cmd) {
 	}
 	c := exec.Command(bin, "--resume", s.ID)
 	c.Dir = dir
-	m.mode = modeList
-	m.detailOf = nil
 	m.status = ""
 	return m, tea.ExecProcess(c, func(err error) tea.Msg {
 		return resumedMsg{err: err}
 	})
+}
+
+// livePath is where Claude Code itself keeps this session's transcript,
+// regardless of which root the browser is scanning.
+func livePath(s *session.Session) string {
+	return filepath.Join(session.DefaultRoot(), s.ProjectDir, s.ID+".jsonl")
+}
+
+func liveExists(s *session.Session) bool {
+	_, err := os.Stat(livePath(s))
+	return err == nil
+}
+
+// restoreDir is where restore-on-resume reads backups from, falling back
+// to the default location when auto-backup was disabled for this run.
+func (m Model) restoreDir() string {
+	if m.backupDir != "" {
+		return m.backupDir
+	}
+	return backup.DefaultDir()
 }
 
 // switchTmux jumps the attached tmux client to the pane running the
@@ -536,9 +604,55 @@ func (m Model) View() string {
 		return m.viewDetail()
 	case modeInspect:
 		return m.viewInspect()
+	case modeConfirmRestore:
+		return m.viewConfirmRestore()
 	default:
 		return m.viewList()
 	}
+}
+
+// viewConfirmRestore is the restore-then-resume dialog shown when the
+// selected session isn't in Claude's live directory but has a backup.
+func (m Model) viewConfirmRestore() string {
+	s := m.pending
+	if s == nil {
+		return m.viewList()
+	}
+	label := styleDim.Render
+	row := func(k, v string) string {
+		return fmt.Sprintf("%s  %s", label(fmt.Sprintf("%8s", k)), v)
+	}
+	backupDesc := "—"
+	if vs := backup.Versions(m.restoreDir(), s.ID); len(vs) > 0 {
+		largest := vs[0]
+		for _, v := range vs {
+			if v.Size > largest.Size {
+				largest = v
+			}
+		}
+		backupDesc = fmt.Sprintf("%d version(s) · restoring most complete (%s)",
+			len(vs), humanSize(largest.Size))
+	}
+	lines := []string{
+		styleTitle.Render("Restore from backup?"),
+		"",
+		styleDim.Render("This session isn't in Claude Code's live directory —"),
+		styleDim.Render("it will be restored, then resumed."),
+		"",
+		row("session", s.ID),
+		row("project", shortPath(s.CWD)),
+		row("backup", backupDesc),
+		row("restore", shortPath(livePath(s))),
+		row("", styleStatus.Render("destination is clear ✓")),
+		"",
+		styleStatus.Render("y  restore & resume    ·    any other key  cancel"),
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // viewInspect shows a centered card of session metadata and stats.
@@ -705,12 +819,17 @@ func (m Model) viewList() string {
 		previewW = m.width - leftW - 3 // " │ " separator
 	}
 
-	timeW, projW := 4, 16
+	// Two relative-time columns: MODIFIED (last activity, the sort key)
+	// and CREATED (first message). Header words set the column widths.
+	modW, crtW, projW := 8, 7, 16
 	msgsW, modelW := 0, 0
-	titleW := leftW - timeW - projW - 8 // leading/trailing space + 2 gaps
-	if !previewOn {
+	var titleW int
+	if previewOn {
+		projW = 12
+		titleW = leftW - modW - crtW - projW - 8 // leading/trailing + 3 gaps
+	} else {
 		projW, msgsW, modelW = 20, 4, 8
-		titleW = leftW - timeW - projW - msgsW - modelW - 12
+		titleW = leftW - modW - crtW - projW - msgsW - modelW - 12
 	}
 	if titleW < 10 {
 		titleW = 10
@@ -733,23 +852,25 @@ func (m Model) viewList() string {
 	// matching blank column so titles stay aligned.
 	leftLines := make([]string, 0, rows+1)
 	if previewOn {
-		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s ",
-			timeW, "AGE", projW, "PROJECT", titleW, "TITLE")))
+		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s ",
+			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE")))
 	} else {
-		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %-*s  %-*s  %*s  %-*s ",
-			timeW, "AGE", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")))
+		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s  %*s  %-*s ",
+			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")))
 	}
 	for i := start; i < end; i++ {
 		s := m.filtered[i]
 		var body string
 		if previewOn {
-			body = fmt.Sprintf(" %*s  %-*s  %-*s ",
-				timeW, relTime(s.LastTime),
+			body = fmt.Sprintf(" %*s  %*s  %-*s  %-*s ",
+				modW, relTime(s.LastTime),
+				crtW, relTime(s.FirstTime),
 				projW, truncate(projName(s.CWD), projW),
 				titleW, truncate(s.Title, titleW))
 		} else {
-			body = fmt.Sprintf(" %*s  %-*s  %-*s  %*d  %-*s ",
-				timeW, relTime(s.LastTime),
+			body = fmt.Sprintf(" %*s  %*s  %-*s  %-*s  %*d  %-*s ",
+				modW, relTime(s.LastTime),
+				crtW, relTime(s.FirstTime),
 				projW, truncate(projName(s.CWD), projW),
 				titleW, truncate(s.Title, titleW),
 				msgsW, s.UserMsgs+s.AsstMsgs,
