@@ -36,6 +36,7 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `enter` | resume selected session (`claude --resume <id>` in its original cwd; exiting Claude returns to the browser). If the session isn't in Claude's live dir but a backup exists (e.g. it was reaped, or you're browsing backups), a dialog offers to restore it first, then resume |
 | `v` `l` `→` | view transcript |
 | `i` | inspect: session id, start/end dates, duration, message/tool/token counts, running status, file size |
+| `V` | browse stored backup versions of the selected session (view any version's transcript, restore-and-resume a specific one) |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
@@ -89,6 +90,16 @@ csb --restore <session-id>      # restore the most complete version so --resume 
 ```
 
 `--restore` brings back the **most complete (largest) version**, so a later truncation can never mask the good copy, and it refuses to overwrite a session that still exists live. The inspect card (`i`) shows how many versions are stored and flags (`⚠`) when an older version holds more data than the newest — the sign of a truncated live file. Existing pre-versioning (flat) backups are migrated in place on the next sync: the old copy is seeded as version 1 before anything else is captured. You can also raise `cleanupPeriodDays` in `~/.claude/settings.json` to keep the originals longer.
+
+### Browsing versions (`V`)
+
+Press `V` on any session to open its version browser: every stored version, newest first, with its timestamp, size, and record count, plus flags for the **most complete** (`★`) and the one matching the **current live** file (`●`). From there:
+
+- `v` / `→` — view that version's transcript in the reader.
+- `enter` — restore that specific version and resume it. If a live transcript already exists, it's captured as a version *first*, so going back to an older state is itself reversible — nothing is ever lost.
+- `esc` — back to the list.
+
+This is how you resume an *earlier* state rather than the most-complete default: pick the version you want and press `enter`. `--no-auto-backup` only disables the on-launch sync now; it no longer forgets the backup location, so restore/version browsing still works with an explicit `--backup-dir`.
 
 ## Remote sessions
 

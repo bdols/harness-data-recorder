@@ -206,6 +206,46 @@ func Restore(dest, root, id string) (string, error) {
 	return "", fmt.Errorf("session %s not found under %s", id, dest)
 }
 
+// RestoreVersion writes a specific stored version (versionPath) over the
+// session's live transcript at root/<projectDir>/<id>.jsonl. Any existing
+// live transcript is first captured into dest's version history, so
+// switching to an older version never loses the current one. Returns the
+// destination path.
+func RestoreVersion(dest, root, projectDir, id, versionPath string) (string, error) {
+	if _, err := os.Stat(versionPath); err != nil {
+		return "", fmt.Errorf("version not found: %w", err)
+	}
+	liveDst := filepath.Join(root, projectDir, id+".jsonl")
+	if _, err := os.Stat(liveDst); err == nil {
+		// Preserve the current live state before overwriting it, so going
+		// back to an older version is itself reversible.
+		if _, err := storeVersion(liveDst, filepath.Join(dest, projectDir, id+".versions")); err != nil {
+			return "", err
+		}
+	}
+	if err := copyPreserving(versionPath, liveDst); err != nil {
+		return "", err
+	}
+	return liveDst, nil
+}
+
+// MatchLive returns the path of the version whose content matches the
+// file at livePath, or "" if none does (or livePath is absent). Versions
+// embed a content hash in their filename, so this only hashes livePath.
+func MatchLive(versions []Version, livePath string) string {
+	sum, err := sha256File(livePath)
+	if err != nil {
+		return ""
+	}
+	short := sum[:12]
+	for _, v := range versions {
+		if strings.Contains(filepath.Base(v.Path), short) {
+			return v.Path
+		}
+	}
+	return ""
+}
+
 // Version describes one stored version of a session.
 type Version struct {
 	Path string

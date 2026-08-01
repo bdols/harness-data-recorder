@@ -30,6 +30,7 @@ const (
 	modeConfirmDelete
 	modeInspect
 	modeConfirmRestore
+	modeVersions
 )
 
 var (
@@ -48,7 +49,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -73,9 +74,20 @@ type Model struct {
 
 	detail   viewport.Model
 	detailOf *session.Session
+	// detailBack is the mode to return to when leaving the detail view
+	// (modeList normally, modeVersions when viewing a specific version).
+	detailBack mode
 
-	// pending holds a session awaiting a restore-then-resume confirmation.
-	pending *session.Session
+	// Version browser state for the selected session.
+	versions      []versionRow
+	versionOf     *session.Session
+	versionCursor int
+
+	// pending holds a session awaiting a restore-then-resume confirmation;
+	// pendingVersion, when set, is the specific version file to restore
+	// (otherwise the most complete version is chosen).
+	pending        *session.Session
+	pendingVersion string
 
 	// live holds currently-running sessions keyed by session id,
 	// refreshed alongside every scan.
@@ -320,12 +332,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.mode = modeList
 				return m, nil
 			}
-			// Restore refuses to overwrite a live file, so the destination
-			// is guaranteed clear before we resume.
-			dst, err := backup.Restore(m.restoreDir(), session.DefaultRoot(), s.ID)
+			var dst string
+			var err error
+			if m.pendingVersion != "" {
+				// Restore a specific chosen version (the current live state,
+				// if any, is captured first inside RestoreVersion).
+				dst, err = backup.RestoreVersion(m.restoreDir(), session.DefaultRoot(), s.ProjectDir, s.ID, m.pendingVersion)
+			} else {
+				// Default: most complete version. Restore refuses to
+				// overwrite a live file, so the destination is clear.
+				dst, err = backup.Restore(m.restoreDir(), session.DefaultRoot(), s.ID)
+			}
 			if err != nil {
 				m.mode = modeList
-				m.detailOf, m.pending = nil, nil
+				m.detailOf, m.pending, m.pendingVersion = nil, nil, ""
 				m.err = "restore: " + err.Error()
 				return m, nil
 			}
@@ -333,7 +353,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.launchClaude(s)
 		default: // any other key cancels
 			m.mode = modeList
-			m.detailOf, m.pending = nil, nil
+			m.detailOf, m.pending, m.pendingVersion = nil, nil, ""
 			m.status = "restore cancelled"
 			return m, nil
 		}
@@ -347,24 +367,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.resume()
 		case "w":
 			return m.switchTmux()
+		case "V":
+			if s := m.selected(); s != nil {
+				m.openVersions(s)
+			}
+			return m, nil
 		default: // any other key closes
 			m.mode = modeList
 			return m, nil
 		}
 
+	case modeVersions:
+		return m.handleVersionsKey(msg)
+
 	case modeDetail:
 		switch msg.String() {
 		case "q", "esc", "h", "left":
-			m.mode = modeList
+			back := m.detailBack
+			m.detailBack = modeList
+			m.mode = back
 			m.detailOf = nil
 			return m, nil
 		case "i":
 			m.mode = modeInspect
+			m.detailBack = modeList
 			m.detailOf = nil
 			return m, nil
 		case "w":
 			return m.switchTmux()
 		case "enter":
+			// Resuming while viewing a specific version restores that
+			// version rather than the (possibly newer) live transcript.
+			if m.detailBack == modeVersions && m.versionOf != nil && m.detailOf != nil {
+				m.pending = m.versionOf
+				m.pendingVersion = m.detailOf.Path
+				m.detailOf = nil
+				m.detailBack = modeList
+				m.mode = modeConfirmRestore
+				return m, nil
+			}
 			return m.resume()
 		case "ctrl+c":
 			return m, tea.Quit
@@ -431,9 +472,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selected() != nil {
 				m.mode = modeInspect
 			}
+		case "V":
+			if s := m.selected(); s != nil {
+				m.openVersions(s)
+			}
 		case "v", "l", "right", "tab":
 			if s := m.selected(); s != nil {
 				m.detailOf = s
+				m.detailBack = modeList
 				m.mode = modeDetail
 				m.setDetailContent()
 			}
@@ -442,6 +488,53 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// handleVersionsKey drives the version browser: move the selection, view
+// a version's transcript, or restore-and-resume a chosen version.
+func (m Model) handleVersionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "h", "left":
+		m.mode = modeList
+		m.versions = nil
+		m.versionOf = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.versionCursor > 0 {
+			m.versionCursor--
+		}
+	case "down", "j":
+		if m.versionCursor < len(m.versions)-1 {
+			m.versionCursor++
+		}
+	case "g", "home":
+		m.versionCursor = 0
+	case "G", "end":
+		m.versionCursor = len(m.versions) - 1
+		if m.versionCursor < 0 {
+			m.versionCursor = 0
+		}
+	case "v", "l", "right":
+		if v := m.selectedVersion(); v != nil {
+			// View this version's transcript via the detail viewer.
+			vs := *m.versionOf
+			vs.Path = v.Path
+			vs.Title = m.versionOf.Title + "  ·  version " + v.Time.Local().Format("2006-01-02 15:04:05")
+			m.detailOf = &vs
+			m.detailBack = modeVersions
+			m.mode = modeDetail
+			m.setDetailContent()
+		}
+	case "enter":
+		if v := m.selectedVersion(); v != nil {
+			m.pending = m.versionOf
+			m.pendingVersion = v.Path
+			m.mode = modeConfirmRestore
+		}
+	}
+	return m, nil
 }
 
 func (m *Model) selected() *session.Session {
@@ -474,7 +567,7 @@ func (m Model) resume() (tea.Model, tea.Cmd) {
 // transcript is assumed present in Claude's projects dir by now.
 func (m Model) launchClaude(s *session.Session) (tea.Model, tea.Cmd) {
 	m.mode = modeList
-	m.detailOf, m.pending = nil, nil
+	m.detailOf, m.pending, m.pendingVersion = nil, nil, ""
 	dir := s.CWD
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		m.err = fmt.Sprintf("cwd %s no longer exists", dir)
@@ -510,6 +603,62 @@ func (m Model) restoreDir() string {
 		return m.backupDir
 	}
 	return backup.DefaultDir()
+}
+
+// versionRow is one entry in the version browser.
+type versionRow struct {
+	backup.Version
+	records int  // record (line) count, for a rough sense of content
+	largest bool // the most complete version (restore default)
+	live    bool // content matches the current live transcript
+}
+
+// openVersions loads the stored versions of s (newest first) into the
+// version browser and switches to it.
+func (m *Model) openVersions(s *session.Session) {
+	vs := backup.Versions(m.restoreDir(), s.ID)
+	if len(vs) == 0 {
+		m.status = "no backups stored for this session"
+		return
+	}
+	liveMatch := backup.MatchLive(vs, livePath(s))
+	var maxSize int64 = -1
+	for _, v := range vs {
+		if v.Size > maxSize {
+			maxSize = v.Size
+		}
+	}
+	rows := make([]versionRow, 0, len(vs))
+	for i := len(vs) - 1; i >= 0; i-- { // newest first
+		v := vs[i]
+		rows = append(rows, versionRow{
+			Version: v,
+			records: countRecords(v.Path),
+			largest: v.Size == maxSize,
+			live:    v.Path == liveMatch,
+		})
+	}
+	m.versions = rows
+	m.versionOf = s
+	m.versionCursor = 0
+	m.mode = modeVersions
+}
+
+func (m Model) selectedVersion() *versionRow {
+	if m.versionCursor < 0 || m.versionCursor >= len(m.versions) {
+		return nil
+	}
+	return &m.versions[m.versionCursor]
+}
+
+// countRecords returns the number of newline-delimited records in a
+// session file, a cheap proxy for how much it contains.
+func countRecords(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
 }
 
 // switchTmux jumps the attached tmux client to the pane running the
@@ -606,9 +755,67 @@ func (m Model) View() string {
 		return m.viewInspect()
 	case modeConfirmRestore:
 		return m.viewConfirmRestore()
+	case modeVersions:
+		return m.viewVersions()
 	default:
 		return m.viewList()
 	}
+}
+
+// viewVersions renders the stored versions of a session, newest first,
+// with the most complete and the currently-live one flagged.
+func (m Model) viewVersions() string {
+	s := m.versionOf
+	if s == nil || len(m.versions) == 0 {
+		return m.viewList()
+	}
+	head := styleTitle.Render(truncate("Versions · "+s.Title, m.width-1)) + "\n" +
+		styleDim.Render(truncate(fmt.Sprintf("%s · %s · %d stored", shortPath(s.CWD), s.ID, len(m.versions)), m.width-1))
+
+	whenW, ageW, sizeW, recW := 19, 5, 9, 8
+	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %*s  %*s  %*s  %-s ",
+		whenW, "WHEN", ageW, "AGE", sizeW, "SIZE", recW, "RECORDS", "FLAGS"))
+
+	rows := m.height - 5
+	if rows < 1 {
+		rows = 1
+	}
+	start := 0
+	if m.versionCursor >= rows {
+		start = m.versionCursor - rows + 1
+	}
+	end := start + rows
+	if end > len(m.versions) {
+		end = len(m.versions)
+	}
+
+	var b strings.Builder
+	b.WriteString(head + "\n" + header + "\n")
+	for i := start; i < end; i++ {
+		v := m.versions[i]
+		flags := ""
+		if v.largest {
+			flags += "★ most complete  "
+		}
+		if v.live {
+			flags += "● live"
+		}
+		body := fmt.Sprintf(" %-*s  %*s  %*s  %*d  %-s ",
+			whenW, v.Time.Local().Format("2006-01-02 15:04:05"),
+			ageW, relTime(v.Time),
+			sizeW, humanSize(v.Size),
+			recW, v.records,
+			strings.TrimSpace(flags))
+		if i == m.versionCursor {
+			body = styleSelected.Render(body)
+		}
+		b.WriteString(" " + body + "\n")
+	}
+	for i := end - start; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(styleStatus.Render(" ↑/↓ select · v view transcript · enter restore & resume · esc back"))
+	return b.String()
 }
 
 // viewConfirmRestore is the restore-then-resume dialog shown when the
@@ -622,30 +829,56 @@ func (m Model) viewConfirmRestore() string {
 	row := func(k, v string) string {
 		return fmt.Sprintf("%s  %s", label(fmt.Sprintf("%8s", k)), v)
 	}
-	backupDesc := "—"
-	if vs := backup.Versions(m.restoreDir(), s.ID); len(vs) > 0 {
-		largest := vs[0]
-		for _, v := range vs {
-			if v.Size > largest.Size {
-				largest = v
+	var lines []string
+	if m.pendingVersion != "" {
+		// Restoring a specific chosen version (from the version browser).
+		var ver backup.Version
+		for _, v := range backup.Versions(m.restoreDir(), s.ID) {
+			if v.Path == m.pendingVersion {
+				ver = v
+				break
 			}
 		}
-		backupDesc = fmt.Sprintf("%d version(s) · restoring most complete (%s)",
-			len(vs), humanSize(largest.Size))
-	}
-	lines := []string{
-		styleTitle.Render("Restore from backup?"),
-		"",
-		styleDim.Render("This session isn't in Claude Code's live directory —"),
-		styleDim.Render("it will be restored, then resumed."),
-		"",
-		row("session", s.ID),
-		row("project", shortPath(s.CWD)),
-		row("backup", backupDesc),
-		row("restore", shortPath(livePath(s))),
-		row("", styleStatus.Render("destination is clear ✓")),
-		"",
-		styleStatus.Render("y  restore & resume    ·    any other key  cancel"),
+		lines = []string{
+			styleTitle.Render("Restore this version & resume?"),
+			"",
+			styleDim.Render("The current live transcript is saved as a version first,"),
+			styleDim.Render("then this version becomes the live session."),
+			"",
+			row("session", s.ID),
+			row("project", shortPath(s.CWD)),
+			row("version", fmt.Sprintf("%s · %s · %d records",
+				ver.Time.Local().Format("2006-01-02 15:04:05"), humanSize(ver.Size), countRecords(ver.Path))),
+			row("resume", shortPath(livePath(s))),
+			"",
+			styleStatus.Render("y  restore & resume    ·    any other key  cancel"),
+		}
+	} else {
+		backupDesc := "—"
+		if vs := backup.Versions(m.restoreDir(), s.ID); len(vs) > 0 {
+			largest := vs[0]
+			for _, v := range vs {
+				if v.Size > largest.Size {
+					largest = v
+				}
+			}
+			backupDesc = fmt.Sprintf("%d version(s) · restoring most complete (%s)",
+				len(vs), humanSize(largest.Size))
+		}
+		lines = []string{
+			styleTitle.Render("Restore from backup?"),
+			"",
+			styleDim.Render("This session isn't in Claude Code's live directory —"),
+			styleDim.Render("it will be restored, then resumed."),
+			"",
+			row("session", s.ID),
+			row("project", shortPath(s.CWD)),
+			row("backup", backupDesc),
+			row("restore", shortPath(livePath(s))),
+			row("", styleStatus.Render("destination is clear ✓")),
+			"",
+			styleStatus.Render("y  restore & resume    ·    any other key  cancel"),
+		}
 	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

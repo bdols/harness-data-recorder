@@ -267,6 +267,66 @@ func TestSyncMigratesLegacyFlatBackup(t *testing.T) {
 	}
 }
 
+// TestRestoreVersionPreservesCurrent checks that restoring an older
+// version over a live file first captures the live file as a version, so
+// going back is reversible and nothing is lost.
+func TestRestoreVersionPreservesCurrent(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	path := writeSession(t, root, "-proj", "sid.jsonl", "old-v1\n", t0)
+	if _, _, err := Sync(root, dest); err != nil { // version 1: old
+		t.Fatal(err)
+	}
+	// The session grows; sync captures the newer state as version 2.
+	if err := os.WriteFile(path, []byte("old-v1\nnew-v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t1 := t0.Add(time.Hour)
+	_ = os.Chtimes(path, t1, t1)
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	vs := Versions(dest, "sid")
+	if len(vs) != 2 {
+		t.Fatalf("got %d versions, want 2", len(vs))
+	}
+	oldest := vs[0] // Versions is oldest-first
+
+	// Restore the OLDER version over the (newer) live file.
+	dst, err := RestoreVersion(dest, root, "-proj", "sid", oldest.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if string(got) != "old-v1\n" {
+		t.Errorf("live is %q after restore, want the older version %q", got, "old-v1\n")
+	}
+	// The newer state must still be recoverable — it was captured before
+	// the overwrite, so all versions remain (no net loss).
+	if vs2 := Versions(dest, "sid"); len(vs2) != 2 {
+		t.Errorf("got %d versions after version-restore, want 2 (nothing lost)", len(vs2))
+	}
+}
+
+func TestMatchLive(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	mt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	live := writeSession(t, root, "-proj", "sid.jsonl", "content-A\n", mt)
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+	vs := Versions(dest, "sid")
+	if got := MatchLive(vs, live); got != vs[0].Path {
+		t.Errorf("MatchLive = %q, want the stored version %q", got, vs[0].Path)
+	}
+	// A file with different content matches nothing.
+	other := writeSession(t, root, "-proj", "other.jsonl", "content-B\n", mt)
+	if got := MatchLive(vs, other); got != "" {
+		t.Errorf("MatchLive of unrelated content = %q, want \"\"", got)
+	}
+}
+
 func TestRestoreRefusesOverwrite(t *testing.T) {
 	root, dest := t.TempDir(), t.TempDir()
 	mtime := time.Now()

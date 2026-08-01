@@ -116,8 +116,10 @@ wait_absent() {
 
 launch() {
 	"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+	# Point --backup-dir at an empty dir so the suite is hermetic: without
+	# it, restore-on-resume would consult the developer's real backups.
 	"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-		"CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --no-auto-backup"
+		"CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
 	wait_for "sessions" 8 || echo "  (warning: TUI status line never appeared)"
 }
 
@@ -185,6 +187,26 @@ send "i"
 wait_for "session id" 3
 assert_present "inspect works after search" "sess-alpha"
 send Escape
+
+echo "version browser (V)"
+BK="$WORK/backups"
+rm -rf "$BK"
+"$CSB" --root "$FIX" --backup-dir "$BK" --backup >/dev/null
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $BK --no-auto-backup"
+wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
+send V
+wait_for "RECORDS" 5
+assert_present "version browser opens" "RECORDS"
+assert_present "version browser flags most complete" "most complete"
+send v # view the version transcript
+wait_for "searching for needle" 5
+assert_present "version transcript viewer renders" "searching for needle"
+send Escape # back to version list
+send Escape # back to session list
+wait_for "MODIFIED" 5
+assert_present "escape returns to list" "MODIFIED"
 
 echo "resume hand-off (enter)"
 launch # alpha selected at top
