@@ -97,7 +97,10 @@ Press `V` on any session to open its version browser: every stored version, newe
 
 - `v` / `→` — view that version's transcript in the reader.
 - `enter` — restore that specific version and resume it. If a live transcript already exists, it's captured as a version *first*, so going back to an older state is itself reversible — nothing is ever lost.
+- `w` — switch to the session's tmux window (if it's running).
 - `esc` — back to the list.
+
+Restoring a version is **blocked while the session is running** — overwriting a live transcript would be clobbered by the running process on its next save. The browser flags this (`⚠ session is running — restoring a version is disabled`); switch to it with `w` and stop it first. Viewing a version's transcript is always allowed.
 
 This is how you resume an *earlier* state rather than the most-complete default: pick the version you want and press `enter`. `--no-auto-backup` only disables the on-launch sync now; it no longer forgets the backup location, so restore/version browsing still works with an explicit `--backup-dir`.
 

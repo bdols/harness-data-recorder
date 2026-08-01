@@ -208,6 +208,29 @@ send Escape # back to session list
 wait_for "MODIFIED" 5
 assert_present "escape returns to list" "MODIFIED"
 
+echo "running-session guard (V + enter)"
+# Fake a running claude process (cmdline must contain "claude") and a
+# registry entry so sess-alpha is detected as live.
+mkdir -p "$WORK/sessions"
+cp "$(command -v sleep)" "$WORK/claude-keeper"
+"$WORK/claude-keeper" 300 &
+KEEPER=$!
+printf '{"pid":%d,"sessionId":"sess-alpha","cwd":"%s","status":"busy","name":"a","updatedAt":1}\n' \
+	"$KEEPER" "$FIX" >"$WORK/sessions/$KEEPER.json"
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"CSB_SESSIONS_DIR=$WORK/sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $BK --no-auto-backup"
+wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
+send V
+wait_for "RECORDS" 5
+assert_present "running session shows restore-disabled warning" "restoring a version is disabled"
+send Enter # attempt a version restore
+sleep 0.5
+assert_absent "version restore blocked while running" "Restore this version"
+send q
+kill "$KEEPER" 2>/dev/null
+rm -f "$WORK"/sessions/*.json
+
 echo "resume hand-off (enter)"
 launch # alpha selected at top
 send Enter

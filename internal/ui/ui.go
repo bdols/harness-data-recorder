@@ -335,6 +335,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var dst string
 			var err error
 			if m.pendingVersion != "" {
+				// Defense in depth: never overwrite a running session's
+				// transcript, even if a guard upstream was missed.
+				if m.isRunning(s.ID) {
+					m.mode = modeList
+					m.detailOf, m.pending, m.pendingVersion = nil, nil, ""
+					m.err = "session is running — restore aborted"
+					return m, nil
+				}
 				// Restore a specific chosen version (the current live state,
 				// if any, is captured first inside RestoreVersion).
 				dst, err = backup.RestoreVersion(m.restoreDir(), session.DefaultRoot(), s.ProjectDir, s.ID, m.pendingVersion)
@@ -399,6 +407,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Resuming while viewing a specific version restores that
 			// version rather than the (possibly newer) live transcript.
 			if m.detailBack == modeVersions && m.versionOf != nil && m.detailOf != nil {
+				if m.isRunning(m.versionOf.ID) {
+					m.detailOf = nil
+					m.detailBack = modeList
+					m.mode = modeVersions
+					m.status = "session is running — stop it (w to switch) before restoring a version"
+					return m, nil
+				}
 				m.pending = m.versionOf
 				m.pendingVersion = m.detailOf.Path
 				m.detailOf = nil
@@ -516,9 +531,12 @@ func (m Model) handleVersionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.versionCursor < 0 {
 			m.versionCursor = 0
 		}
+	case "w":
+		return m.switchTmux()
 	case "v", "l", "right":
 		if v := m.selectedVersion(); v != nil {
-			// View this version's transcript via the detail viewer.
+			// Viewing a version's transcript is always safe, even while the
+			// session is running.
 			vs := *m.versionOf
 			vs.Path = v.Path
 			vs.Title = m.versionOf.Title + "  ·  version " + v.Time.Local().Format("2006-01-02 15:04:05")
@@ -529,6 +547,11 @@ func (m Model) handleVersionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if v := m.selectedVersion(); v != nil {
+			if m.isRunning(m.versionOf.ID) {
+				// Guard: don't overwrite a running session's transcript.
+				m.status = "session is running — stop it (w to switch) before restoring a version"
+				return m, nil
+			}
 			m.pending = m.versionOf
 			m.pendingVersion = v.Path
 			m.mode = modeConfirmRestore
@@ -649,6 +672,14 @@ func (m Model) selectedVersion() *versionRow {
 		return nil
 	}
 	return &m.versions[m.versionCursor]
+}
+
+// isRunning reports whether the session is currently live. Restoring a
+// version over a running session's transcript is unsafe — the live
+// process would clobber the restore on its next save — so it's blocked.
+func (m Model) isRunning(id string) bool {
+	_, ok := m.live[id]
+	return ok
 }
 
 // countRecords returns the number of newline-delimited records in a
@@ -776,7 +807,19 @@ func (m Model) viewVersions() string {
 	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %*s  %*s  %*s  %-s ",
 		whenW, "WHEN", ageW, "AGE", sizeW, "SIZE", recW, "RECORDS", "FLAGS"))
 
+	// A running session blocks restore (it would clobber the live file);
+	// show that up front. Otherwise surface any transient status.
+	notice := ""
+	if m.isRunning(s.ID) {
+		notice = styleError.Render(" ⚠ session is running — restoring a version is disabled (w to switch, then stop it)")
+	} else if m.status != "" {
+		notice = styleStatus.Render(" " + m.status)
+	}
+
 	rows := m.height - 5
+	if notice != "" {
+		rows--
+	}
 	if rows < 1 {
 		rows = 1
 	}
@@ -798,7 +841,7 @@ func (m Model) viewVersions() string {
 			flags += "★ most complete  "
 		}
 		if v.live {
-			flags += "● live"
+			flags += "● current"
 		}
 		body := fmt.Sprintf(" %-*s  %*s  %*s  %*d  %-s ",
 			whenW, v.Time.Local().Format("2006-01-02 15:04:05"),
@@ -814,7 +857,10 @@ func (m Model) viewVersions() string {
 	for i := end - start; i < rows; i++ {
 		b.WriteString("\n")
 	}
-	b.WriteString(styleStatus.Render(" ↑/↓ select · v view transcript · enter restore & resume · esc back"))
+	if notice != "" {
+		b.WriteString(notice + "\n")
+	}
+	b.WriteString(styleStatus.Render(" ↑/↓ select · v view transcript · enter restore & resume · w tmux · esc back"))
 	return b.String()
 }
 
