@@ -644,22 +644,25 @@ func (m *Model) openVersions(s *session.Session) {
 		m.status = "no backups stored for this session"
 		return
 	}
-	liveMatch := backup.MatchLive(vs, livePath(s))
-	var maxSize int64 = -1
-	for _, v := range vs {
-		if v.Size > maxSize {
-			maxSize = v.Size
-		}
-	}
+	liveID := backup.FileID(livePath(s))
 	rows := make([]versionRow, 0, len(vs))
 	for i := len(vs) - 1; i >= 0; i-- { // newest first
 		v := vs[i]
 		rows = append(rows, versionRow{
 			Version: v,
 			records: countRecords(v.Path),
-			largest: v.Size == maxSize,
-			live:    v.Path == liveMatch,
+			live:    liveID != "" && backup.VersionID(v.Path) == liveID,
 		})
+	}
+	// Flag exactly one row as most complete: the largest, newest on ties.
+	best := -1
+	for i := range rows {
+		if best == -1 || rows[i].Size > rows[best].Size {
+			best = i
+		}
+	}
+	if best >= 0 {
+		rows[best].largest = true
 	}
 	m.versions = rows
 	m.versionOf = s

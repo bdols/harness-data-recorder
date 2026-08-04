@@ -109,8 +109,10 @@ func snapshot(src, dest, project, id string) (bool, error) {
 }
 
 // storeVersion writes src into vdir under a name derived from its mtime
-// and content hash, so identical states map to the same file and are
-// captured at most once. It reports whether a new file was written.
+// and content hash. Dedup is by CONTENT alone: if this exact content is
+// already stored under any timestamp, nothing is written. Claude Code
+// bumps a session file's mtime without changing its content, and that
+// must not spawn a duplicate version. Reports whether a file was written.
 func storeVersion(src, vdir string) (bool, error) {
 	fi, err := os.Stat(src)
 	if err != nil {
@@ -120,14 +122,39 @@ func storeVersion(src, vdir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	vpath := filepath.Join(vdir, versionName(fi.ModTime(), sum))
-	if _, err := os.Stat(vpath); err == nil {
-		return false, nil // this exact state is already stored
+	short := sum[:12]
+	if entries, err := os.ReadDir(vdir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.Contains(e.Name(), short) {
+				return false, nil // content already stored
+			}
+		}
 	}
+	vpath := filepath.Join(vdir, versionName(fi.ModTime(), sum))
 	if err := copyPreserving(src, vpath); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// VersionID returns the content hash embedded in a version filename
+// (<mtime>-<hash>.jsonl), identifying that version's content.
+func VersionID(versionPath string) string {
+	base := strings.TrimSuffix(filepath.Base(versionPath), ".jsonl")
+	if i := strings.LastIndex(base, "-"); i >= 0 {
+		return base[i+1:]
+	}
+	return base
+}
+
+// FileID returns the same content key for an arbitrary file (the first
+// 12 hex chars of its sha256), or "" if it can't be read.
+func FileID(path string) string {
+	sum, err := sha256File(path)
+	if err != nil {
+		return ""
+	}
+	return sum[:12]
 }
 
 // versionName is <mtime>-<hash12>.jsonl. The leading timestamp makes the
@@ -233,13 +260,12 @@ func RestoreVersion(dest, root, projectDir, id, versionPath string) (string, err
 // file at livePath, or "" if none does (or livePath is absent). Versions
 // embed a content hash in their filename, so this only hashes livePath.
 func MatchLive(versions []Version, livePath string) string {
-	sum, err := sha256File(livePath)
-	if err != nil {
+	id := FileID(livePath)
+	if id == "" {
 		return ""
 	}
-	short := sum[:12]
 	for _, v := range versions {
-		if strings.Contains(filepath.Base(v.Path), short) {
+		if VersionID(v.Path) == id {
 			return v.Path
 		}
 	}
@@ -268,7 +294,19 @@ func Versions(dest, id string) []Version {
 		out = append(out, listVersions(filepath.Join(dest, d.Name(), id+".versions"))...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
-	return out
+	// Collapse exact-content duplicates (e.g. left by earlier versions of
+	// this tool that keyed on mtime), keeping the earliest occurrence.
+	seen := make(map[string]bool, len(out))
+	deduped := out[:0]
+	for _, v := range out {
+		k := VersionID(v.Path)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		deduped = append(deduped, v)
+	}
+	return deduped
 }
 
 // listVersions returns the version files in vdir with their sizes and

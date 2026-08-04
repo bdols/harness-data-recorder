@@ -270,6 +270,34 @@ func TestSyncMigratesLegacyFlatBackup(t *testing.T) {
 // TestRestoreVersionPreservesCurrent checks that restoring an older
 // version over a live file first captures the live file as a version, so
 // going back is reversible and nothing is lost.
+// TestSyncDedupsByContentAcrossMtime is the regression test for
+// duplicate versions: Claude Code bumps a session file's mtime without
+// changing its content, and that must not create a second version of the
+// same bytes.
+func TestSyncDedupsByContentAcrossMtime(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p := writeSession(t, root, "-proj", "sid.jsonl", "unchanged body\n", t0)
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+	// Bump only the mtime — content is byte-identical.
+	t1 := t0.Add(3 * time.Hour)
+	if err := os.Chtimes(p, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	copied, _, err := Sync(root, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copied != 0 {
+		t.Errorf("mtime-only bump created %d new version(s), want 0", copied)
+	}
+	if vs := Versions(dest, "sid"); len(vs) != 1 {
+		t.Errorf("got %d versions after mtime bump, want 1 (deduped by content)", len(vs))
+	}
+}
+
 func TestRestoreVersionPreservesCurrent(t *testing.T) {
 	root, dest := t.TempDir(), t.TempDir()
 	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
