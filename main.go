@@ -6,11 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bdols/claude-session-browser/internal/backup"
+	"github.com/bdols/claude-session-browser/internal/live"
 	"github.com/bdols/claude-session-browser/internal/session"
 	"github.com/bdols/claude-session-browser/internal/ui"
 )
@@ -24,11 +27,17 @@ func main() {
 	backupDir := flag.String("backup-dir", backup.DefaultDir(), "where session backups are kept")
 	noAutoBackup := flag.Bool("no-auto-backup", false, "don't back up sessions automatically when the TUI starts")
 	restore := flag.String("restore", "", "restore a backed-up session `id` into the projects dir and exit")
+	running := flag.Bool("running", false, "list currently-running Claude sessions (flagging reaped ones) and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("claude-session-browser", version)
+		return
+	}
+
+	if *running {
+		printRunning()
 		return
 	}
 
@@ -85,6 +94,46 @@ func printList(root string) error {
 			s.CWD, clip(s.Title, 48), s.UserMsgs+s.AsstMsgs, s.Model, s.ID)
 	}
 	return w.Flush()
+}
+
+// printRunning lists running Claude sessions, reaped ones first, so a
+// long-lived process whose transcript was cleaned up can be found and
+// rescued (jump in, send a message to rewrite the file, then back it up).
+func printRunning() {
+	sessions := live.Scan()
+	if len(sessions) == 0 {
+		fmt.Println("no running Claude sessions detected")
+		return
+	}
+	type row struct {
+		live.Session
+		reaped bool
+	}
+	rows := make([]row, 0, len(sessions))
+	for id, ls := range sessions {
+		matches, _ := filepath.Glob(filepath.Join(session.DefaultRoot(), "*", id+".jsonl"))
+		rows = append(rows, row{Session: ls, reaped: len(matches) == 0})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].reaped != rows[j].reaped {
+			return rows[i].reaped
+		}
+		return rows[i].UpdatedAt.After(rows[j].UpdatedAt)
+	})
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "STATUS\tPID\tTRANSCRIPT\tWHERE\tSESSION")
+	for _, r := range rows {
+		where := r.CWD
+		if r.TmuxWindow != "" {
+			where = fmt.Sprintf("tmux %s (%s)", r.TmuxWindow, r.TmuxLabel)
+		}
+		transcript := "saved"
+		if r.reaped {
+			transcript = "REAPED — rescue"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\n", r.Status, r.PID, transcript, where, r.SessionID)
+	}
+	w.Flush()
 }
 
 func clip(s string, n int) string {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ const (
 	modeInspect
 	modeConfirmRestore
 	modeVersions
+	modeRunning
 )
 
 var (
@@ -49,7 +51,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · R running · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -92,6 +94,13 @@ type Model struct {
 	// live holds currently-running sessions keyed by session id,
 	// refreshed alongside every scan.
 	live map[string]live.Session
+	// reaped is the set of running session ids whose transcript file no
+	// longer exists in Claude's projects dir — rescue candidates.
+	reaped map[string]bool
+
+	// Running-sessions (rescue) browser state.
+	running       []runningRow
+	runningCursor int
 
 	// transcripts caches parsed session files for the preview pane,
 	// keyed by file path; cleared on every rescan.
@@ -201,6 +210,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case liveMsg:
 		m.live = msg.sessions
+		// A running session whose transcript file is gone from Claude's
+		// projects dir is a rescue candidate: its content lives only in the
+		// running process now.
+		m.reaped = map[string]bool{}
+		for id := range m.live {
+			if !hasTranscript(id) {
+				m.reaped[id] = true
+			}
+		}
+		if m.mode == modeRunning {
+			m.refreshRunning()
+		}
 		return m, nil
 
 	case switchedMsg:
@@ -388,6 +409,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeVersions:
 		return m.handleVersionsKey(msg)
 
+	case modeRunning:
+		return m.handleRunningKey(msg)
+
 	case modeDetail:
 		switch msg.String() {
 		case "q", "esc", "h", "left":
@@ -491,6 +515,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if s := m.selected(); s != nil {
 				m.openVersions(s)
 			}
+		case "R":
+			if len(m.live) > 0 {
+				m.openRunning()
+			} else {
+				m.status = "no running sessions detected"
+			}
 		case "v", "l", "right", "tab":
 			if s := m.selected(); s != nil {
 				m.detailOf = s
@@ -503,6 +533,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// handleRunningKey drives the running-sessions (rescue) browser.
+func (m Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "h", "left":
+		m.mode = modeList
+		m.running = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.runningCursor > 0 {
+			m.runningCursor--
+		}
+	case "down", "j":
+		if m.runningCursor < len(m.running)-1 {
+			m.runningCursor++
+		}
+	case "g", "home":
+		m.runningCursor = 0
+	case "G", "end":
+		m.runningCursor = len(m.running) - 1
+		if m.runningCursor < 0 {
+			m.runningCursor = 0
+		}
+	case "r":
+		m.status = "rescanning…"
+		return m, tea.Batch(scanCmd(m.root), liveCmd())
+	case "enter", "w", "l", "right":
+		if rr := m.selectedRunning(); rr != nil {
+			return m.switchToLive(rr.Session)
+		}
+	}
+	return m, nil
 }
 
 // handleVersionsKey drives the version browser: move the selection, view
@@ -685,6 +750,65 @@ func (m Model) isRunning(id string) bool {
 	return ok
 }
 
+// hasTranscript reports whether a session id still has a transcript file
+// in Claude Code's projects dir (any project). A running session without
+// one has been reaped and can only be rescued from its live process.
+func hasTranscript(id string) bool {
+	matches, _ := filepath.Glob(filepath.Join(session.DefaultRoot(), "*", id+".jsonl"))
+	return len(matches) > 0
+}
+
+// runningRow is one entry in the running-sessions (rescue) browser.
+type runningRow struct {
+	live.Session
+	reaped bool // transcript file is gone; rescue from the process
+}
+
+// refreshRunning rebuilds the running-sessions list from the live
+// registry, reaped (rescuable) sessions first, keeping the cursor valid.
+func (m *Model) refreshRunning() {
+	rows := make([]runningRow, 0, len(m.live))
+	for id, ls := range m.live {
+		rows = append(rows, runningRow{Session: ls, reaped: m.reaped[id]})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].reaped != rows[j].reaped {
+			return rows[i].reaped // reaped first
+		}
+		return rows[i].UpdatedAt.After(rows[j].UpdatedAt)
+	})
+	m.running = rows
+	if m.runningCursor >= len(rows) {
+		m.runningCursor = len(rows) - 1
+	}
+	if m.runningCursor < 0 {
+		m.runningCursor = 0
+	}
+}
+
+// openRunning enters the running-sessions (rescue) browser.
+func (m *Model) openRunning() {
+	m.runningCursor = 0
+	m.refreshRunning()
+	m.mode = modeRunning
+}
+
+func (m Model) selectedRunning() *runningRow {
+	if m.runningCursor < 0 || m.runningCursor >= len(m.running) {
+		return nil
+	}
+	return &m.running[m.runningCursor]
+}
+
+// reapedCount is the number of running sessions with no saved transcript.
+func (m Model) reapedCount() int {
+	n := 0
+	for range m.reaped {
+		n++
+	}
+	return n
+}
+
 // countRecords returns the number of newline-delimited records in a
 // session file, a cheap proxy for how much it contains.
 func countRecords(path string) int {
@@ -711,6 +835,11 @@ func (m Model) switchTmux() (tea.Model, tea.Cmd) {
 		m.err = "session is not running"
 		return m, nil
 	}
+	return m.switchToLive(ls)
+}
+
+// switchToLive focuses the tmux pane of a specific running session.
+func (m Model) switchToLive(ls live.Session) (tea.Model, tea.Cmd) {
 	if ls.TmuxPane == "" {
 		m.err = "session is running but not inside tmux"
 		return m, nil
@@ -791,9 +920,80 @@ func (m Model) View() string {
 		return m.viewConfirmRestore()
 	case modeVersions:
 		return m.viewVersions()
+	case modeRunning:
+		return m.viewRunning()
 	default:
 		return m.viewList()
 	}
+}
+
+// viewRunning lists currently-running Claude sessions, reaped (rescuable)
+// ones first, so long-lived processes whose transcript was cleaned up can
+// be found and rescued before the process exits.
+func (m Model) viewRunning() string {
+	if len(m.running) == 0 {
+		return m.viewList()
+	}
+	head := styleTitle.Render("Running Claude sessions") + "\n" +
+		styleDim.Render(fmt.Sprintf("%d running · %d with no saved transcript (rescue below)", len(m.running), m.reapedCount()))
+
+	stW, pidW, whereW := 8, 7, 40
+	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %*s  %-*s  %-s ",
+		stW, "STATUS", pidW, "PID", whereW, "WHERE", "TRANSCRIPT"))
+
+	rows := m.height - 6
+	if rows < 1 {
+		rows = 1
+	}
+	start := 0
+	if m.runningCursor >= rows {
+		start = m.runningCursor - rows + 1
+	}
+	end := start + rows
+	if end > len(m.running) {
+		end = len(m.running)
+	}
+
+	var b strings.Builder
+	b.WriteString(head + "\n" + header + "\n")
+	for i := start; i < end; i++ {
+		rr := m.running[i]
+		where := shortPath(rr.CWD)
+		if rr.TmuxWindow != "" {
+			where = fmt.Sprintf("tmux %s (%s)", rr.TmuxWindow, rr.TmuxLabel)
+		} else {
+			where += "  [not in tmux]"
+		}
+		transcript := "saved"
+		if rr.reaped {
+			transcript = "⚠ REAPED — rescue"
+		}
+		glyph, gstyle := liveMarker(rr.Status)
+		body := fmt.Sprintf(" %s %-*s  %*d  %-*s  %-s ",
+			gstyle.Render(glyph), stW-2, rr.Status,
+			pidW, rr.PID,
+			whereW, truncate(where, whereW),
+			transcript)
+		if i == m.runningCursor {
+			body = styleSelected.Render(body)
+		}
+		b.WriteString(" " + body + "\n")
+	}
+	for i := end - start; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	// Guidance / status line.
+	guide := "reaped: no transcript on disk — its content lives only in the running process"
+	if rr := m.selectedRunning(); rr != nil && rr.reaped {
+		guide = "rescue: enter/w to jump in, send any message to rewrite the file, then esc · r · b to back it up"
+	}
+	if m.err != "" {
+		b.WriteString(styleError.Render(" "+m.err) + "\n")
+	} else {
+		b.WriteString(styleDim.Render(" "+guide) + "\n")
+	}
+	b.WriteString(styleStatus.Render(" ↑/↓ select · enter/w switch to session · r rescan · esc back"))
+	return b.String()
 }
 
 // viewVersions renders the stored versions of a session, newest first,
@@ -1243,6 +1443,9 @@ func (m Model) statusAndHelp() (status, help string) {
 		status = styleStatus.Render(truncate(fmt.Sprintf(" filter:%q · %d sessions · esc clear", m.filter.Value(), len(m.filtered)), m.width-1))
 	default:
 		status = styleStatus.Render(fmt.Sprintf(" %d sessions", len(m.filtered))) + m.liveLegend()
+		if n := m.reapedCount(); n > 0 {
+			status += styleError.Render(fmt.Sprintf(" · ⚠ %d running with no saved transcript — press R to rescue", n))
+		}
 		if m.status != "" {
 			status += styleStatus.Render(" · " + truncate(m.status, m.width-1))
 		}

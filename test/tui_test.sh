@@ -116,10 +116,12 @@ wait_absent() {
 
 launch() {
 	"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
-	# Point --backup-dir at an empty dir so the suite is hermetic: without
-	# it, restore-on-resume would consult the developer's real backups.
+	# Point --backup-dir and CSB_SESSIONS_DIR at empty dirs so the suite is
+	# hermetic: otherwise restore-on-resume would consult the developer's
+	# real backups and live detection would pick up their real sessions.
+	mkdir -p "$WORK/empty-sessions"
 	"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-		"CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
+		"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
 	wait_for "sessions" 8 || echo "  (warning: TUI status line never appeared)"
 }
 
@@ -230,6 +232,37 @@ assert_absent "version restore blocked while running" "Restore this version"
 send q
 kill "$KEEPER" 2>/dev/null
 rm -f "$WORK"/sessions/*.json
+
+echo "running / rescue view (R)"
+# A hermetic home with one saved transcript and a registry naming two
+# running sessions: one whose file exists (saved) and one whose file is
+# gone (reaped). Fake processes keep both "alive".
+RHOME="$WORK/rhome"
+mkdir -p "$RHOME/.claude/projects/-proj" "$WORK/rsessions"
+printf '{"sessionId":"savedsess","type":"ai-title","aiTitle":"Saved One","cwd":"%s"}\n' "$RHOME" \
+	>"$RHOME/.claude/projects/-proj/savedsess.jsonl"
+cp "$(command -v sleep)" "$WORK/claude-k1"
+cp "$(command -v sleep)" "$WORK/claude-k2"
+"$WORK/claude-k1" 300 &
+K1=$!
+"$WORK/claude-k2" 300 &
+K2=$!
+printf '{"pid":%d,"sessionId":"savedsess","cwd":"%s","status":"idle","updatedAt":2}\n' "$K1" "$RHOME" \
+	>"$WORK/rsessions/$K1.json"
+printf '{"pid":%d,"sessionId":"reapedsess","cwd":"%s","status":"idle","updatedAt":1}\n' "$K2" "$RHOME" \
+	>"$WORK/rsessions/$K2.json"
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"HOME=$RHOME CSB_SESSIONS_DIR=$WORK/rsessions CSB_CLAUDE_BIN=$STUB $CSB --root $RHOME/.claude/projects --backup-dir $BK --no-auto-backup"
+wait_for "no saved transcript" 8 || echo "  (warning: reaped alert never appeared)"
+assert_present "main list alerts about reaped running sessions" "no saved transcript"
+send R
+wait_for "TRANSCRIPT" 5
+assert_present "running view flags the reaped session" "REAPED"
+assert_present "running view lists the saved session" "saved"
+send q
+kill "$K1" "$K2" 2>/dev/null
+rm -rf "$RHOME" "$WORK/rsessions"
 
 echo "resume hand-off (enter)"
 launch # alpha selected at top

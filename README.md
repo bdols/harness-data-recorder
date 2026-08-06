@@ -21,6 +21,7 @@ go build -o csb .
 ```sh
 csb                 # launch the TUI
 csb --list          # plain-text session table to stdout
+csb --running       # list running Claude sessions (flags reaped ones) and exit
 csb --root /path    # scan an alternate projects dir (see Remote below)
 ```
 
@@ -37,6 +38,7 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `v` `l` `→` | view transcript |
 | `i` | inspect: session id, start/end dates, duration, message/tool/token counts, running status, file size |
 | `V` | browse stored backup versions of the selected session (view any version's transcript, restore-and-resume a specific one) |
+| `R` | list currently-running Claude sessions, flagging ones whose transcript was cleaned up (rescue candidates); `enter`/`w` jumps to one |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
@@ -58,6 +60,12 @@ A marker in the left gutter shows sessions that are **currently running**, encod
 The status bar shows a per-status breakdown (e.g. `●11 ◆2 ▲2 live`), which also serves as a legend, and the inspect card spells the status out in words.
 
 Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.json` (which records the resolved session id, cwd, and status), drops stale entries whose process has exited, and walks the process's parents through `/proc` to find its tmux pane. Pressing `w` on a live session runs `tmux switch-client`/`select-window` to bring that pane to the foreground — the browser keeps running in its own pane. This works when the browser itself is running inside tmux.
+
+### Rescuing reaped-but-running sessions
+
+Claude Code cleans up a session's `.jsonl` after `cleanupPeriodDays`, but a **long-running process still holds the transcript in memory** — sending it any message rewrites the file. So a months-old running session whose file was reaped isn't lost, just invisible: no file means it never appears in the list, and if the process dies the transcript is gone for good.
+
+`R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `csb --running` prints the same list for scripting.
 
 ### Environment
 
