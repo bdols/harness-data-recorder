@@ -154,3 +154,75 @@ The Go tests build their own fixtures in temp dirs — including the running-ses
 Each `.jsonl` line is a typed record (`user`, `assistant`, `ai-title`, `last-prompt`, …). The scanner does a partial JSON decode of every line to extract the title, cwd, git branch, model, timestamps, and human/assistant message counts, skipping meta records, sidechains, and tool results. The transcript view re-parses the file into user prompts, assistant text, and one-line tool-call summaries.
 
 Running-session detection is separate: Claude Code maintains `~/.claude/sessions/<pid>.json` for each live process, giving an exact session id regardless of how it was launched. The browser reads that registry, validates each pid against `/proc` (dropping stale files and guarding pid reuse), and walks parent pids until it reaches a tmux pane to locate the window.
+
+### UI state machine
+
+The TUI is a mode-based state machine (`internal/ui/ui.go`). `enter` is polymorphic — it resumes a live session, restores-then-resumes a reaped one, or restores a chosen version — and version restores are blocked while the session is running (the self-loops below).
+
+```mermaid
+stateDiagram-v2
+    [*] --> List
+
+    state List {
+        [*] --> Browsing
+        Browsing --> Filtering: /
+        Filtering --> Browsing: esc · enter
+        Browsing --> Searching: s
+        Searching --> Browsing: esc · enter (ripgrep)
+    }
+
+    List --> Detail: v · l · → · tab
+    List --> Inspect: i
+    List --> Versions: V
+    List --> Running: R  (if live > 0)
+    List --> ConfirmDelete: d
+    List --> Export: e
+    List --> SwitchTmux: w
+
+    Detail --> Inspect: i
+    Detail --> Export: e
+    Detail --> SwitchTmux: w
+    Detail --> List: esc · q · h · ←  (detailBack = List)
+    Detail --> Versions: esc  (detailBack = Versions)
+
+    Inspect --> Versions: V
+    Inspect --> SwitchTmux: w
+    Inspect --> List: any other key
+
+    Versions --> Detail: v · l · →  (view a version)
+    Versions --> Export: e  (export selected version)
+    Versions --> List: esc · q
+    Versions --> ConfirmRestore: enter  (if NOT running)
+    Versions --> Versions: enter  (blocked: session running)
+
+    Running --> SwitchToLive: enter · w · l · →
+    Running --> Running: r (rescan)
+    Running --> List: esc · q
+
+    ConfirmDelete --> List: y (delete) · any (cancel)
+
+    ConfirmRestore --> Resuming: y (restore ± version, then resume)
+    ConfirmRestore --> List: any (cancel) · error
+
+    List --> ConfirmRestore: enter  (reaped + backup exists)
+    List --> Resuming: enter  (live transcript present)
+    Inspect --> Resuming: enter
+    Detail --> Resuming: enter (own transcript)
+    Detail --> ConfirmRestore: enter (viewing a version, if NOT running)
+
+    Resuming --> List: claude exits (resumedMsg)
+
+    SwitchTmux --> List: tmux switch-client (side effect)
+    SwitchToLive --> Running: tmux switch-client (side effect)
+
+    Export --> List: writes .md, status update
+
+    List --> [*]: q
+    note right of Resuming
+        TUI suspended;
+        claude --resume runs
+        in the session's cwd
+    end note
+```
+
+`List` is the hub; `Filtering`/`Searching` are input overlays within it. `Resuming` isn't a UI mode — `tea.ExecProcess` suspends the TUI to run `claude --resume`, and `resumedMsg` returns to `List`. `SwitchTmux`/`SwitchToLive` and `Export` are side-effects that don't change the logical state.
