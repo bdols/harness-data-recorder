@@ -51,7 +51,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · R running · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -425,6 +425,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailBack = modeList
 			m.detailOf = nil
 			return m, nil
+		case "e":
+			if m.detailOf != nil {
+				return m.exportMarkdownFile(*m.detailOf, "")
+			}
 		case "w":
 			return m.switchTmux()
 		case "enter":
@@ -521,6 +525,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "no running sessions detected"
 			}
+		case "e":
+			if s := m.selected(); s != nil {
+				return m.exportMarkdownFile(*s, "")
+			}
 		case "v", "l", "right", "tab":
 			if s := m.selected(); s != nil {
 				m.detailOf = s
@@ -609,6 +617,16 @@ func (m Model) handleVersionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailBack = modeVersions
 			m.mode = modeDetail
 			m.setDetailContent()
+		}
+	case "e":
+		if v := m.selectedVersion(); v != nil {
+			vs, err := session.ParseFile(v.Path)
+			if err != nil {
+				m.err = "export: " + err.Error()
+				return m, nil
+			}
+			vs.ID = m.versionOf.ID // the version filename isn't the id
+			return m.exportMarkdownFile(vs, v.Time.Local().Format("20060102-1504"))
 		}
 	case "enter":
 		if v := m.selectedVersion(); v != nil {
@@ -807,6 +825,61 @@ func (m Model) reapedCount() int {
 		n++
 	}
 	return n
+}
+
+// exportMarkdownFile renders s to Markdown and writes it into the current
+// working directory; label distinguishes a version export.
+func (m Model) exportMarkdownFile(s session.Session, label string) (tea.Model, tea.Cmd) {
+	md, err := session.Markdown(s)
+	if err != nil {
+		m.err = "export: " + err.Error()
+		return m, nil
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	path := filepath.Join(dir, exportName(s.Title, s.ID, label))
+	if err := os.WriteFile(path, []byte(md), 0o644); err != nil {
+		m.err = "export: " + err.Error()
+		return m, nil
+	}
+	m.status = "exported to " + path
+	return m, nil
+}
+
+// exportName builds a filesystem-friendly Markdown filename from a
+// session's title and id (plus an optional label for versions).
+func exportName(title, id, label string) string {
+	slug := slugify(title)
+	if slug == "" {
+		slug = "session"
+	}
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	name := slug + "-" + short
+	if label != "" {
+		name += "-" + label
+	}
+	return name + ".md"
+}
+
+func slugify(s string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			dash = false
+		case !dash:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // countRecords returns the number of newline-delimited records in a
@@ -1063,7 +1136,7 @@ func (m Model) viewVersions() string {
 	if notice != "" {
 		b.WriteString(notice + "\n")
 	}
-	b.WriteString(styleStatus.Render(" ↑/↓ select · v view transcript · enter restore & resume · w tmux · esc back"))
+	b.WriteString(styleStatus.Render(" ↑/↓ select · v view · e export · enter restore & resume · w tmux · esc back"))
 	return b.String()
 }
 

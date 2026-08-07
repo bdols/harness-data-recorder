@@ -233,6 +233,20 @@ send q
 kill "$KEEPER" 2>/dev/null
 rm -f "$WORK"/sessions/*.json
 
+echo "markdown export (e)"
+mkdir -p "$WORK/empty-sessions"
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+# -c sets the working dir so the exported .md lands in the throwaway WORK.
+"$TMUX_BIN" new-session -d -s "$SES" -c "$WORK" -x 150 -y 40 \
+	"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
+wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
+send e
+wait_for "exported to" 5
+assert_present "export reports the written file" "exported to"
+if ls "$WORK"/*.md >/dev/null 2>&1; then ok "markdown file created"; else bad "no .md file created"; fi
+if grep -q "## 👤 User" "$WORK"/*.md 2>/dev/null; then ok "markdown has turn headings"; else bad "markdown missing headings"; fi
+rm -f "$WORK"/*.md
+
 echo "running / rescue view (R)"
 # A hermetic home with one saved transcript and a registry naming two
 # running sessions: one whose file exists (saved) and one whose file is

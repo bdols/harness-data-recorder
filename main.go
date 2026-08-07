@@ -28,6 +28,7 @@ func main() {
 	noAutoBackup := flag.Bool("no-auto-backup", false, "don't back up sessions automatically when the TUI starts")
 	restore := flag.String("restore", "", "restore a backed-up session `id` into the projects dir and exit")
 	running := flag.Bool("running", false, "list currently-running Claude sessions (flagging reaped ones) and exit")
+	export := flag.String("export", "", "export session `id` as Markdown to stdout and exit (uses the most complete copy: live or backup)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -38,6 +39,13 @@ func main() {
 
 	if *running {
 		printRunning()
+		return
+	}
+
+	if *export != "" {
+		if err := exportMarkdown(*root, *backupDir, *export); err != nil {
+			fatal(err)
+		}
 		return
 	}
 
@@ -94,6 +102,51 @@ func printList(root string) error {
 			s.CWD, clip(s.Title, 48), s.UserMsgs+s.AsstMsgs, s.Model, s.ID)
 	}
 	return w.Flush()
+}
+
+// exportMarkdown writes the Markdown of the session with the given id to
+// stdout, choosing the most complete transcript available — the live
+// file or the largest backup version — so a reaped session still exports
+// its full history from backups.
+func exportMarkdown(root, backupDir, id string) error {
+	path := transcriptPath(root, backupDir, id)
+	if path == "" {
+		return fmt.Errorf("session %s not found under %s or backups", id, root)
+	}
+	s, err := session.ParseFile(path)
+	if err != nil {
+		return err
+	}
+	s.ID = id // a version file's name isn't the session id
+	md, err := session.Markdown(s)
+	if err != nil {
+		return err
+	}
+	fmt.Print(md)
+	return nil
+}
+
+// transcriptPath returns the largest available transcript for id among
+// the live projects dir, the backup versions, and the flat backup file.
+func transcriptPath(root, backupDir, id string) string {
+	var candidates []string
+	if m, _ := filepath.Glob(filepath.Join(root, "*", id+".jsonl")); len(m) > 0 {
+		candidates = append(candidates, m...)
+	}
+	for _, v := range backup.Versions(backupDir, id) {
+		candidates = append(candidates, v.Path)
+	}
+	if m, _ := filepath.Glob(filepath.Join(backupDir, "*", id+".jsonl")); len(m) > 0 {
+		candidates = append(candidates, m...)
+	}
+	best := ""
+	var bestSize int64 = -1
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.Size() > bestSize {
+			best, bestSize = c, fi.Size()
+		}
+	}
+	return best
 }
 
 // printRunning lists running Claude sessions, reaped ones first, so a

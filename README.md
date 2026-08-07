@@ -22,6 +22,7 @@ go build -o csb .
 csb                 # launch the TUI
 csb --list          # plain-text session table to stdout
 csb --running       # list running Claude sessions (flags reaped ones) and exit
+csb --export <id>   # render a session's transcript as Markdown to stdout
 csb --root /path    # scan an alternate projects dir (see Remote below)
 ```
 
@@ -39,6 +40,7 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `i` | inspect: session id, start/end dates, duration, message/tool/token counts, running status, file size |
 | `V` | browse stored backup versions of the selected session (view any version's transcript, restore-and-resume a specific one) |
 | `R` | list currently-running Claude sessions, flagging ones whose transcript was cleaned up (rescue candidates); `enter`/`w` jumps to one |
+| `e` | export the session's transcript to a Markdown file in the current directory (in the version browser, exports the selected version) |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
@@ -66,6 +68,16 @@ Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.
 Claude Code cleans up a session's `.jsonl` after `cleanupPeriodDays`, but a **long-running process still holds the transcript in memory** — sending it any message rewrites the file. So a months-old running session whose file was reaped isn't lost, just invisible: no file means it never appears in the list, and if the process dies the transcript is gone for good.
 
 `R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `csb --running` prints the same list for scripting.
+
+## Exporting to Markdown
+
+Press `e` to export a session's transcript to a readable Markdown file (title, id, project, model, date range, then each user/assistant turn). It's written to the current directory. In the version browser, `e` exports the specific version you've selected — so you can export an older, more complete state.
+
+```sh
+csb --export <session-id> > session.md
+```
+
+`--export` picks the **most complete** transcript available for that id — the live file or the largest backup version — so a reaped session still exports its full history straight from backups. (This differs from Claude Code's own `/export`, which dumps only the current in-memory context — for a compacted session that's just the summary plus recent turns, not the full history that csb's backups retain.)
 
 ### Environment
 

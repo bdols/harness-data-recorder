@@ -5,6 +5,7 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -262,6 +263,79 @@ type Entry struct {
 
 var commandNameRe = regexp.MustCompile(`<command-name>([^<]*)</command-name>`)
 var commandArgsRe = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
+
+// ParseFile parses a single session .jsonl into a Session, for callers
+// that have a file path rather than a scan root (e.g. exporting a
+// specific backup version).
+func ParseFile(path string) (Session, error) {
+	return parseFile(path)
+}
+
+// Markdown renders a session's transcript as a Markdown document. Header
+// labels come from s (title, id, project, model); message counts and the
+// date range are derived from the transcript itself, so it's accurate for
+// any file — a live session, a backup, or a specific version.
+func Markdown(s Session) (string, error) {
+	entries, err := LoadTranscript(s.Path)
+	if err != nil {
+		return "", err
+	}
+	var users, assts, tools int
+	var first, last time.Time
+	for _, e := range entries {
+		switch e.Role {
+		case "user":
+			users++
+		case "assistant":
+			assts++
+		case "tool":
+			tools++
+		}
+		if !e.Time.IsZero() {
+			if first.IsZero() || e.Time.Before(first) {
+				first = e.Time
+			}
+			if e.Time.After(last) {
+				last = e.Time
+			}
+		}
+	}
+
+	var b strings.Builder
+	title := s.Title
+	if title == "" {
+		title = s.ID
+	}
+	fmt.Fprintf(&b, "# %s\n\n", title)
+	if s.ID != "" {
+		fmt.Fprintf(&b, "- **Session:** `%s`\n", s.ID)
+	}
+	if s.CWD != "" {
+		fmt.Fprintf(&b, "- **Project:** `%s`\n", s.CWD)
+	}
+	if s.Model != "" {
+		fmt.Fprintf(&b, "- **Model:** %s\n", s.Model)
+	}
+	if !first.IsZero() {
+		fmt.Fprintf(&b, "- **Started:** %s\n", first.Local().Format("2006-01-02 15:04"))
+	}
+	if !last.IsZero() {
+		fmt.Fprintf(&b, "- **Last active:** %s\n", last.Local().Format("2006-01-02 15:04"))
+	}
+	fmt.Fprintf(&b, "- **Messages:** %d user · %d assistant · %d tool calls\n\n---\n\n", users, assts, tools)
+
+	for _, e := range entries {
+		switch e.Role {
+		case "user":
+			fmt.Fprintf(&b, "## 👤 User\n\n%s\n\n", strings.TrimSpace(e.Text))
+		case "assistant":
+			fmt.Fprintf(&b, "## 🤖 Assistant\n\n%s\n\n", strings.TrimSpace(e.Text))
+		case "tool":
+			fmt.Fprintf(&b, "> `⚙` %s\n\n", strings.TrimSpace(e.Text))
+		}
+	}
+	return b.String(), nil
+}
 
 // LoadTranscript parses the full conversation of a session file into
 // displayable entries.
