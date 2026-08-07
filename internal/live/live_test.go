@@ -19,7 +19,7 @@ func writeRegistry(t *testing.T, dir, file, body string) {
 func TestScanKeepsLiveDropsStale(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistry(t, dir, "100.json",
-		`{"pid":100,"sessionId":"live-one","cwd":"/p","status":"busy","name":"n","updatedAt":1000}`)
+		`{"pid":100,"sessionId":"live-one","cwd":"/p","status":"busy","name":"n","version":"2.1.204","updatedAt":1000}`)
 	writeRegistry(t, dir, "200.json",
 		`{"pid":200,"sessionId":"stale-one","cwd":"/q","status":"idle","updatedAt":2000}`)
 	writeRegistry(t, dir, "notjson.txt", `ignored`)
@@ -35,7 +35,7 @@ func TestScanKeepsLiveDropsStale(t *testing.T) {
 	if !ok {
 		t.Fatal("live session missing")
 	}
-	if s.PID != 100 || s.Status != "busy" || s.CWD != "/p" {
+	if s.PID != 100 || s.Status != "busy" || s.CWD != "/p" || s.Version != "2.1.204" {
 		t.Errorf("unexpected fields: %+v", s)
 	}
 	if _, ok := got["stale-one"]; ok {

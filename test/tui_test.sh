@@ -261,19 +261,23 @@ cp "$(command -v sleep)" "$WORK/claude-k2"
 K1=$!
 "$WORK/claude-k2" 300 &
 K2=$!
-printf '{"pid":%d,"sessionId":"savedsess","cwd":"%s","status":"idle","updatedAt":2}\n' "$K1" "$RHOME" \
+printf '{"pid":%d,"sessionId":"savedsess","cwd":"%s","status":"idle","version":"9.9.9","updatedAt":2}\n' "$K1" "$RHOME" \
 	>"$WORK/rsessions/$K1.json"
-printf '{"pid":%d,"sessionId":"reapedsess","cwd":"%s","status":"idle","updatedAt":1}\n' "$K2" "$RHOME" \
+printf '{"pid":%d,"sessionId":"reapedsess","cwd":"%s","status":"idle","version":"9.9.9","updatedAt":1}\n' "$K2" "$RHOME" \
 	>"$WORK/rsessions/$K2.json"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
 	"HOME=$RHOME CSB_SESSIONS_DIR=$WORK/rsessions CSB_CLAUDE_BIN=$STUB $CSB --root $RHOME/.claude/projects --backup-dir $BK --no-auto-backup"
 wait_for "no saved transcript" 8 || echo "  (warning: reaped alert never appeared)"
 assert_present "main list alerts about reaped running sessions" "no saved transcript"
+# savedsess has a transcript and is running, so the main list shows its
+# Claude Code version in the CC VER column.
+assert_present "main list shows CC VER for a running session" "9.9.9"
 send R
 wait_for "TRANSCRIPT" 5
 assert_present "running view flags the reaped session" "REAPED"
 assert_present "running view lists the saved session" "saved"
+assert_present "running view shows the CC VER column" "CC VER"
 send q
 kill "$K1" "$K2" 2>/dev/null
 rm -rf "$RHOME" "$WORK/rsessions"

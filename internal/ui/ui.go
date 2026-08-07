@@ -1010,9 +1010,9 @@ func (m Model) viewRunning() string {
 	head := styleTitle.Render("Running Claude sessions") + "\n" +
 		styleDim.Render(fmt.Sprintf("%d running · %d with no saved transcript (rescue below)", len(m.running), m.reapedCount()))
 
-	stW, pidW, whereW := 8, 7, 40
-	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %*s  %-*s  %-s ",
-		stW, "STATUS", pidW, "PID", whereW, "WHERE", "TRANSCRIPT"))
+	stW, pidW, verW, whereW := 8, 7, 8, 34
+	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %*s  %-*s  %-*s  %-s ",
+		stW, "STATUS", pidW, "PID", verW, "CC VER", whereW, "WHERE", "TRANSCRIPT"))
 
 	rows := m.height - 6
 	if rows < 1 {
@@ -1042,9 +1042,10 @@ func (m Model) viewRunning() string {
 			transcript = "⚠ REAPED — rescue"
 		}
 		glyph, gstyle := liveMarker(rr.Status)
-		body := fmt.Sprintf(" %s %-*s  %*d  %-*s  %-s ",
+		body := fmt.Sprintf(" %s %-*s  %*d  %-*s  %-*s  %-s ",
 			gstyle.Render(glyph), stW-2, rr.Status,
 			pidW, rr.PID,
+			verW, truncate(orDash(rr.Version), verW),
 			whereW, truncate(where, whereW),
 			transcript)
 		if i == m.runningCursor {
@@ -1378,13 +1379,23 @@ func (m Model) viewList() string {
 	// and CREATED (first message). Header words set the column widths.
 	modW, crtW, projW := 8, 7, 16
 	msgsW, modelW := 0, 0
+	// CC VER column: the running session's Claude Code version. Shown only
+	// when a visible session is actually running, so it costs no width
+	// otherwise. It's appended after the fixed columns below.
+	verW, verGap := 0, 0
+	for _, s := range m.filtered {
+		if ls, ok := m.live[s.ID]; ok && ls.Version != "" {
+			verW, verGap = 7, 9 // width + " " gap + trailing " "
+			break
+		}
+	}
 	var titleW int
 	if previewOn {
 		projW = 12
-		titleW = leftW - modW - crtW - projW - 8 // leading/trailing + 3 gaps
+		titleW = leftW - modW - crtW - projW - verGap - 8 // leading/trailing + 3 gaps
 	} else {
 		projW, msgsW, modelW = 20, 4, 8
-		titleW = leftW - modW - crtW - projW - msgsW - modelW - 12
+		titleW = leftW - modW - crtW - projW - msgsW - modelW - verGap - 12
 	}
 	if titleW < 10 {
 		titleW = 10
@@ -1405,13 +1416,19 @@ func (m Model) viewList() string {
 
 	// Rows carry a leading one-column live indicator; the header gets a
 	// matching blank column so titles stay aligned.
+	verSuffix := func(v string) string {
+		if verW == 0 {
+			return ""
+		}
+		return fmt.Sprintf(" %-*s ", verW, truncate(v, verW))
+	}
 	leftLines := make([]string, 0, rows+1)
 	if previewOn {
 		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s ",
-			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE")))
+			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE")+verSuffix("CC VER")))
 	} else {
 		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s  %*s  %-*s ",
-			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")))
+			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")+verSuffix("CC VER")))
 	}
 	for i := start; i < end; i++ {
 		s := m.filtered[i]
@@ -1431,6 +1448,7 @@ func (m Model) viewList() string {
 				msgsW, s.UserMsgs+s.AsstMsgs,
 				modelW, truncate(shortModel(s.Model), modelW))
 		}
+		body += verSuffix(m.live[s.ID].Version)
 		if i == m.cursor {
 			body = styleSelected.Render(body)
 		}

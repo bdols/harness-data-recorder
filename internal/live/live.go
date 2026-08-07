@@ -30,6 +30,7 @@ type Session struct {
 	CWD       string
 	Status    string // "idle", "busy", "waiting", …
 	Name      string
+	Version   string // Claude Code version, e.g. "2.1.204"
 	UpdatedAt time.Time
 
 	// tmux location, empty when the session isn't running inside tmux.
@@ -45,6 +46,7 @@ type registryEntry struct {
 	CWD       string `json:"cwd"`
 	Status    string `json:"status"`
 	Name      string `json:"name"`
+	Version   string `json:"version"`
 	UpdatedAt int64  `json:"updatedAt"` // epoch millis
 }
 
@@ -111,6 +113,7 @@ func scan(dir string, alive func(int) bool, panes map[int]pane) map[string]Sessi
 			CWD:       r.CWD,
 			Status:    r.Status,
 			Name:      r.Name,
+			Version:   r.Version,
 			UpdatedAt: time.UnixMilli(r.UpdatedAt),
 		}
 		if pane, ok := paneForPID(r.PID, panes); ok {

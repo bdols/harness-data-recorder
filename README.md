@@ -28,7 +28,7 @@ csb --root /path    # scan an alternate projects dir (see Remote below)
 
 On terminals ≥95 columns wide the TUI shows a split view: the session list on the left and a live preview of the selected session's transcript tail on the right. Narrower terminals fall back to a full-width list.
 
-The list shows two time columns: **MODIFIED** (time since the last message — the sort key) and **CREATED** (time since the first message). Both are derived from record timestamps, not file mtime. The inspect card (`i`) shows the exact start/end timestamps and span.
+The list shows two time columns: **MODIFIED** (time since the last message — the sort key) and **CREATED** (time since the first message). Both are derived from record timestamps, not file mtime. The inspect card (`i`) shows the exact start/end timestamps and span. When any visible session is running, a **CC VER** column appears showing each running session's Claude Code version (from the registry) — handy for spotting long-lived processes stuck on an old version.
 
 ### Keys
 

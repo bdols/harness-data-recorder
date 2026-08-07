@@ -174,7 +174,7 @@ func printRunning() {
 		return rows[i].UpdatedAt.After(rows[j].UpdatedAt)
 	})
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "STATUS\tPID\tTRANSCRIPT\tWHERE\tSESSION")
+	fmt.Fprintln(w, "STATUS\tPID\tCC VER\tTRANSCRIPT\tWHERE\tSESSION")
 	for _, r := range rows {
 		where := r.CWD
 		if r.TmuxWindow != "" {
@@ -184,7 +184,11 @@ func printRunning() {
 		if r.reaped {
 			transcript = "REAPED — rescue"
 		}
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\n", r.Status, r.PID, transcript, where, r.SessionID)
+		ver := r.Version
+		if ver == "" {
+			ver = "—"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Status, r.PID, ver, transcript, where, r.SessionID)
 	}
 	w.Flush()
 }
