@@ -67,6 +67,7 @@ mkfixtures() {
 {"type":"ai-title","aiTitle":"Alpha Session","sessionId":"sess-alpha"}
 {"type":"user","message":{"role":"user","content":"find the needle please"},"timestamp":"$ts_new","cwd":"$CWD_ALPHA","gitBranch":"main","version":"9.9.9"}
 {"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"searching for needle and Needle now"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}},"timestamp":"$ts_new2"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","name":"Bash","input":{"command":"echo audit-marker-xyz"}}]},"timestamp":"$ts_new2"}
 EOF
 
 	cat >"$FIX/proj-beta/sess-beta.jsonl" <<EOF
@@ -232,6 +233,25 @@ assert_absent "version restore blocked while running" "Restore this version"
 send q
 kill "$KEEPER" 2>/dev/null
 rm -f "$WORK"/sessions/*.json
+
+echo "tool-call audit (--commands and c)"
+# CLI: the Bash tool call from the alpha fixture must appear.
+if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands 2>/dev/null | grep -q "echo audit-marker-xyz"; then
+	ok "--commands lists the Bash tool call"
+else
+	bad "--commands missing the Bash tool call"
+fi
+if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands audit-marker 2>/dev/null | grep -q "echo audit-marker-xyz"; then
+	ok "--commands filter matches"
+else
+	bad "--commands filter found nothing"
+fi
+# TUI: c opens the audit view showing the call.
+launch
+send c
+wait_for "Tool-call audit" 5
+assert_present "c opens the audit view" "Tool-call audit"
+assert_present "audit view shows the Bash call" "audit-marker-xyz"
 
 echo "markdown export (e)"
 mkdir -p "$WORK/empty-sessions"

@@ -18,6 +18,7 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 
+	"github.com/bdols/claude-session-browser/internal/audit"
 	"github.com/bdols/claude-session-browser/internal/backup"
 	"github.com/bdols/claude-session-browser/internal/live"
 	"github.com/bdols/claude-session-browser/internal/session"
@@ -33,6 +34,7 @@ const (
 	modeConfirmRestore
 	modeVersions
 	modeRunning
+	modeCommands
 )
 
 var (
@@ -51,7 +53,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -102,6 +104,13 @@ type Model struct {
 	running       []runningRow
 	runningCursor int
 
+	// Command/tool audit browser state.
+	commandsAll   []audit.Entry // full audit, newest first
+	commands      []audit.Entry // filtered view
+	commandCursor int
+	cmdFilter     textinput.Model
+	cmdFiltering  bool
+
 	// transcripts caches parsed session files for the preview pane,
 	// keyed by file path; cleared on every rescan.
 	transcripts map[string][]session.Entry
@@ -122,7 +131,11 @@ func New(root, backupDir string, autoBackup bool) Model {
 	si.Placeholder = "search all session content…"
 	si.Prompt = "search: "
 	si.CharLimit = 256
-	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup, filter: ti, search: si, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
+	ci := textinput.New()
+	ci.Placeholder = "filter commands…"
+	ci.Prompt = "/"
+	ci.CharLimit = 128
+	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup, filter: ti, search: si, cmdFilter: ci, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -149,6 +162,14 @@ type backedUpMsg struct {
 	copied int
 	total  int
 	err    error
+}
+
+type auditedMsg struct{ entries []audit.Entry }
+
+func auditCmd(root, backupDir string) tea.Cmd {
+	return func() tea.Msg {
+		return auditedMsg{entries: audit.Collect(root, backupDir)}
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -207,6 +228,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcripts = map[string][]session.Entry{}
 		m.applyFilter()
 		return m, liveCmd()
+
+	case auditedMsg:
+		m.commandsAll = msg.entries
+		m.commandCursor = 0
+		m.applyCommandFilter()
+		m.mode = modeCommands
+		m.status = ""
+		return m, nil
 
 	case liveMsg:
 		m.live = msg.sessions
@@ -412,6 +441,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeRunning:
 		return m.handleRunningKey(msg)
 
+	case modeCommands:
+		return m.handleCommandsKey(msg)
+
 	case modeDetail:
 		switch msg.String() {
 		case "q", "esc", "h", "left":
@@ -529,6 +561,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if s := m.selected(); s != nil {
 				return m.exportMarkdownFile(*s, "")
 			}
+		case "c":
+			m.status = "auditing tool calls…"
+			return m, auditCmd(m.root, m.restoreDir())
 		case "v", "l", "right", "tab":
 			if s := m.selected(); s != nil {
 				m.detailOf = s
@@ -576,6 +611,104 @@ func (m Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handleCommandsKey drives the tool-call audit view.
+func (m Model) handleCommandsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cmdFiltering {
+		switch msg.String() {
+		case "esc":
+			m.cmdFiltering = false
+			m.cmdFilter.SetValue("")
+			m.cmdFilter.Blur()
+			m.applyCommandFilter()
+			return m, nil
+		case "enter":
+			m.cmdFiltering = false
+			m.cmdFilter.Blur()
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.cmdFilter, cmd = m.cmdFilter.Update(msg)
+			m.applyCommandFilter()
+			return m, cmd
+		}
+	}
+	switch msg.String() {
+	case "q", "esc", "h", "left":
+		m.mode = modeList
+		m.commandsAll, m.commands = nil, nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.commandCursor > 0 {
+			m.commandCursor--
+		}
+	case "down", "j":
+		if m.commandCursor < len(m.commands)-1 {
+			m.commandCursor++
+		}
+	case "g", "home":
+		m.commandCursor = 0
+	case "G", "end":
+		m.commandCursor = len(m.commands) - 1
+		if m.commandCursor < 0 {
+			m.commandCursor = 0
+		}
+	case "/":
+		m.cmdFiltering = true
+		m.cmdFilter.Focus()
+		return m, textinput.Blink
+	case "enter":
+		// Jump to the owning session's transcript, if it's still live.
+		if e := m.selectedCommand(); e != nil {
+			for i := range m.sessions {
+				if m.sessions[i].ID == e.Session {
+					m.detailOf = &m.sessions[i]
+					m.detailBack = modeList
+					m.mode = modeDetail
+					m.setDetailContent()
+					return m, nil
+				}
+			}
+			m.status = "session not live (reaped) — audit only"
+		}
+	}
+	return m, nil
+}
+
+func (m Model) selectedCommand() *audit.Entry {
+	if m.commandCursor < 0 || m.commandCursor >= len(m.commands) {
+		return nil
+	}
+	return &m.commands[m.commandCursor]
+}
+
+// applyCommandFilter narrows commandsAll to rows matching every term in
+// the filter (against tool, detail, and project).
+func (m *Model) applyCommandFilter() {
+	terms := strings.Fields(strings.ToLower(m.cmdFilter.Value()))
+	m.commands = m.commands[:0]
+	for _, e := range m.commandsAll {
+		hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project)
+		ok := true
+		for _, t := range terms {
+			if !strings.Contains(hay, t) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			m.commands = append(m.commands, e)
+		}
+	}
+	if m.commandCursor >= len(m.commands) {
+		m.commandCursor = len(m.commands) - 1
+	}
+	if m.commandCursor < 0 {
+		m.commandCursor = 0
+	}
 }
 
 // handleVersionsKey drives the version browser: move the selection, view
@@ -995,9 +1128,64 @@ func (m Model) View() string {
 		return m.viewVersions()
 	case modeRunning:
 		return m.viewRunning()
+	case modeCommands:
+		return m.viewCommands()
 	default:
 		return m.viewList()
 	}
+}
+
+// viewCommands renders the tool-call audit: a chronological log of every
+// command/tool Claude ran across sessions (live + backups).
+func (m Model) viewCommands() string {
+	head := styleTitle.Render("Tool-call audit") + "\n" +
+		styleDim.Render(fmt.Sprintf("%d of %d calls across sessions (live + backups)", len(m.commands), len(m.commandsAll)))
+
+	whenW, projW, toolW := 16, 16, 8
+	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %-*s  %-*s  %-s ",
+		whenW, "WHEN", projW, "PROJECT", toolW, "TOOL", "DETAIL"))
+	detailW := m.width - whenW - projW - toolW - 10
+	if detailW < 10 {
+		detailW = 10
+	}
+
+	rows := m.height - 6
+	if rows < 1 {
+		rows = 1
+	}
+	start := 0
+	if m.commandCursor >= rows {
+		start = m.commandCursor - rows + 1
+	}
+	end := start + rows
+	if end > len(m.commands) {
+		end = len(m.commands)
+	}
+
+	var b strings.Builder
+	b.WriteString(head + "\n" + header + "\n")
+	for i := start; i < end; i++ {
+		e := m.commands[i]
+		body := fmt.Sprintf(" %-*s  %-*s  %-*s  %-s ",
+			whenW, e.Time.Local().Format("2006-01-02 15:04"),
+			projW, truncate(e.Project, projW),
+			toolW, truncate(e.Tool, toolW),
+			truncate(e.Detail, detailW))
+		if i == m.commandCursor {
+			body = styleSelected.Render(body)
+		}
+		b.WriteString(" " + body + "\n")
+	}
+	for i := end - start; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	if m.cmdFiltering || m.cmdFilter.Value() != "" {
+		b.WriteString(" " + m.cmdFilter.View() + "\n")
+	} else {
+		b.WriteString(styleDim.Render(" every Bash/Edit/Read/… call, newest first — survives the 30-day reap via backups") + "\n")
+	}
+	b.WriteString(styleStatus.Render(" ↑/↓ select · / filter · enter → session · esc back"))
+	return b.String()
 }
 
 // viewRunning lists currently-running Claude sessions, reaped (rescuable)

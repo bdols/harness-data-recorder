@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/bdols/claude-session-browser/internal/audit"
 	"github.com/bdols/claude-session-browser/internal/backup"
 	"github.com/bdols/claude-session-browser/internal/live"
 	"github.com/bdols/claude-session-browser/internal/session"
@@ -29,6 +31,7 @@ func main() {
 	restore := flag.String("restore", "", "restore a backed-up session `id` into the projects dir and exit")
 	running := flag.Bool("running", false, "list currently-running Claude sessions (flagging reaped ones) and exit")
 	export := flag.String("export", "", "export session `id` as Markdown to stdout and exit (uses the most complete copy: live or backup)")
+	commands := flag.Bool("commands", false, "audit every tool call across sessions (live + backups) and exit; optional filter args match tool/detail/project")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -46,6 +49,11 @@ func main() {
 		if err := exportMarkdown(*root, *backupDir, *export); err != nil {
 			fatal(err)
 		}
+		return
+	}
+
+	if *commands {
+		printCommands(*root, *backupDir, flag.Args())
 		return
 	}
 
@@ -147,6 +155,36 @@ func transcriptPath(root, backupDir, id string) string {
 		}
 	}
 	return best
+}
+
+// printCommands prints the tool-call audit as a table, newest first,
+// optionally filtered to rows matching all of the given terms (against
+// tool, detail, or project).
+func printCommands(root, backupDir string, terms []string) {
+	entries := audit.Collect(root, backupDir)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "TIME\tPROJECT\tTOOL\tDETAIL")
+	for _, e := range entries {
+		if !matchesAll(e, terms) {
+			continue
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			e.Time.Local().Format("2006-01-02 15:04"), e.Project, e.Tool, clip(e.Detail, 200))
+	}
+	w.Flush()
+}
+
+func matchesAll(e audit.Entry, terms []string) bool {
+	if len(terms) == 0 {
+		return true
+	}
+	hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project)
+	for _, t := range terms {
+		if !strings.Contains(hay, strings.ToLower(t)) {
+			return false
+		}
+	}
+	return true
 }
 
 // printRunning lists running Claude sessions, reaped ones first, so a

@@ -399,6 +399,71 @@ func LoadTranscript(path string) ([]Entry, error) {
 	return entries, sc.Err()
 }
 
+// ToolCall is one tool invocation (Bash, Edit, Read, …) from a
+// transcript, for the command/tool audit.
+type ToolCall struct {
+	Time   time.Time
+	Tool   string // tool name, e.g. "Bash", "Edit"
+	Detail string // the salient input (command, file path, pattern, …)
+}
+
+// ToolCalls extracts every tool invocation from a session file, in order.
+func ToolCalls(path string) ([]ToolCall, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []ToolCall
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), maxLineSize)
+	for sc.Scan() {
+		var l line
+		if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
+			continue
+		}
+		if l.Message == nil || l.IsSidechain || l.Type != "assistant" {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339, l.Timestamp)
+		var blocks []contentBlock
+		if err := json.Unmarshal(l.Message.Content, &blocks); err != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_use" {
+				out = append(out, ToolCall{Time: ts, Tool: b.Name, Detail: toolDetail(b.Input)})
+			}
+		}
+	}
+	return out, sc.Err()
+}
+
+// toolDetail picks the most audit-relevant field from a tool input,
+// preferring the command actually run over its description.
+func toolDetail(raw json.RawMessage) string {
+	var in struct {
+		Command     string `json:"command"`
+		FilePath    string `json:"file_path"`
+		Path        string `json:"path"`
+		Pattern     string `json:"pattern"`
+		Query       string `json:"query"`
+		URL         string `json:"url"`
+		Description string `json:"description"`
+		Prompt      string `json:"prompt"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return ""
+	}
+	for _, v := range []string{in.Command, in.FilePath, in.Path, in.Pattern, in.Query, in.URL, in.Prompt, in.Description} {
+		if v != "" {
+			return strings.Join(strings.Fields(v), " ")
+		}
+	}
+	return ""
+}
+
 // toolInputSummary extracts a short human hint from a tool_use input.
 func toolInputSummary(raw json.RawMessage) string {
 	var in struct {

@@ -23,6 +23,7 @@ csb                 # launch the TUI
 csb --list          # plain-text session table to stdout
 csb --running       # list running Claude sessions (flags reaped ones) and exit
 csb --export <id>   # render a session's transcript as Markdown to stdout
+csb --commands      # audit every tool call across sessions (live + backups)
 csb --root /path    # scan an alternate projects dir (see Remote below)
 ```
 
@@ -41,6 +42,7 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `V` | browse stored backup versions of the selected session (view any version's transcript, restore-and-resume a specific one) |
 | `R` | list currently-running Claude sessions, flagging ones whose transcript was cleaned up (rescue candidates); `enter`/`w` jumps to one |
 | `e` | export the session's transcript to a Markdown file in the current directory (in the version browser, exports the selected version) |
+| `c` | audit every tool call (Bash, Edit, Read, …) across all sessions, newest first, with `/` to filter and `enter` to jump to the owning session |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
@@ -78,6 +80,20 @@ csb --export <session-id> > session.md
 ```
 
 `--export` picks the **most complete** transcript available for that id — the live file or the largest backup version — so a reaped session still exports its full history straight from backups. (This differs from Claude Code's own `/export`, which dumps only the current in-memory context — for a compacted session that's just the summary plus recent turns, not the full history that csb's backups retain.)
+
+## Command / tool audit
+
+Every command Claude runs is recorded in the transcript as a tool call, so csb can reconstruct a chronological audit of **everything Claude did** — Bash commands, file edits, reads, searches — across all your sessions. It reads from live sessions *and* the backup store, so reaped sessions are still covered.
+
+Press `c` in the TUI for a searchable log (newest first; `/` filters; `enter` jumps to the owning session), or use the CLI:
+
+```sh
+csb --commands                 # full audit: TIME · PROJECT · TOOL · DETAIL
+csb --commands git commit      # filter by term(s) — matches tool, detail, or project
+csb --commands rm > audit.txt  # greppable / redirectable
+```
+
+This is a durable, atuin-style history of Claude's actions that survives Claude Code's 30-day transcript cleanup (because the backups do).
 
 ### Environment
 

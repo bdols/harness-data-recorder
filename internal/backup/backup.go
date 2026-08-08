@@ -272,6 +272,54 @@ func MatchLive(versions []Version, livePath string) string {
 	return ""
 }
 
+// Stored identifies a backed-up session and its most complete transcript.
+type Stored struct {
+	ID      string
+	Project string // munged project dir name under dest
+	Path    string // largest version (or the flat file)
+}
+
+// Sessions lists every session in the backup store with the path to its
+// most complete transcript — used to audit sessions that no longer exist
+// live (reaped).
+func Sessions(dest string) []Stored {
+	dirs, err := os.ReadDir(dest)
+	if err != nil {
+		return nil
+	}
+	var out []Stored
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(dest, d.Name()))
+		if err != nil {
+			continue
+		}
+		ids := map[string]bool{}
+		for _, e := range entries {
+			switch {
+			case e.IsDir() && strings.HasSuffix(e.Name(), ".versions"):
+				ids[strings.TrimSuffix(e.Name(), ".versions")] = true
+			case !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl"):
+				ids[strings.TrimSuffix(e.Name(), ".jsonl")] = true
+			}
+		}
+		for id := range ids {
+			path := bestVersion(filepath.Join(dest, d.Name(), id+".versions"))
+			if path == "" {
+				flat := filepath.Join(dest, d.Name(), id+".jsonl")
+				if _, err := os.Stat(flat); err != nil {
+					continue
+				}
+				path = flat
+			}
+			out = append(out, Stored{ID: id, Project: d.Name(), Path: path})
+		}
+	}
+	return out
+}
+
 // Version describes one stored version of a session.
 type Version struct {
 	Path string
