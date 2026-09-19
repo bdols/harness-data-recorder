@@ -302,6 +302,166 @@ send q
 kill "$K1" "$K2" 2>/dev/null
 rm -rf "$RHOME" "$WORK/rsessions"
 
+echo "re-home a moved project (--rehome)"
+# A session recorded under an old path, whose project has since moved.
+RH="$WORK/rh"
+OLDP="$WORK/old-project"
+NEWP="$WORK/new-project"
+mkdir -p "$RH/-old-project" "$NEWP" "$RH/-old-project/memory"
+printf '{"type":"ai-title","aiTitle":"Moved","sessionId":"movedsess"}\n' >"$RH/-old-project/movedsess.jsonl"
+printf '{"type":"user","message":{"role":"user","content":"hi"},"cwd":"%s","timestamp":"2026-05-01T10:00:00Z"}\n' \
+	"$OLDP" >>"$RH/-old-project/movedsess.jsonl"
+echo "project note" >"$RH/-old-project/memory/note.md"
+MUNGED=$(printf '%s' "$NEWP" | sed 's/[^A-Za-z0-9]/-/g')
+if "$CSB" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >"$WORK/rehome.out" 2>&1; then
+	ok "--rehome exits cleanly"
+else
+	bad "--rehome failed"
+	sed 's/^/    /' "$WORK/rehome.out"
+fi
+if [ -f "$RH/$MUNGED/movedsess.jsonl" ]; then
+	ok "transcript landed in the new project dir"
+else
+	bad "no transcript at $RH/$MUNGED/movedsess.jsonl"
+fi
+if grep -qF "\"cwd\":\"$NEWP\"" "$RH/$MUNGED/movedsess.jsonl" 2>/dev/null &&
+	! grep -qF "\"cwd\":\"$OLDP\"" "$RH/$MUNGED/movedsess.jsonl" 2>/dev/null; then
+	ok "recorded cwd was rewritten to the new path"
+else
+	bad "cwd not rewritten"
+fi
+# Re-homing copies: the original must still be there.
+if [ -f "$RH/-old-project/movedsess.jsonl" ]; then
+	ok "original transcript left in place"
+else
+	bad "original transcript was removed"
+fi
+if [ -f "$RH/$MUNGED/memory/note.md" ]; then
+	ok "project memory carried across"
+else
+	bad "project memory not copied"
+fi
+# A second run must refuse rather than clobber.
+if "$CSB" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >/dev/null 2>&1; then
+	bad "--rehome overwrote an existing destination"
+else
+	ok "--rehome refuses to clobber without --force"
+fi
+
+echo "redact text in a session (--replace)"
+RP="$WORK/rp"
+mkdir -p "$RP/-proj"
+printf '{"type":"ai-title","aiTitle":"Leaky","sessionId":"leaky"}\n' >"$RP/-proj/leaky.jsonl"
+printf '{"type":"user","message":{"role":"user","content":"key sk-live-9999 here"},"cwd":"/proj","timestamp":"2026-05-01T10:00:00Z"}\n' \
+	>>"$RP/-proj/leaky.jsonl"
+"$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --backup >/dev/null 2>&1
+if "$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --replace leaky --from "sk-live-9999" --to "[REDACTED]" --all-versions >"$WORK/rp.out" 2>&1; then
+	ok "--replace exits cleanly"
+else
+	bad "--replace failed"
+	sed 's/^/    /' "$WORK/rp.out"
+fi
+if grep -q "REDACTED" "$RP/-proj/leaky.jsonl" && ! grep -q "sk-live-9999" "$RP/-proj/leaky.jsonl"; then
+	ok "secret scrubbed from the live transcript"
+else
+	bad "secret still in the live transcript"
+fi
+# --all-versions must reach into the backup history too, or the secret
+# simply lives on there.
+if grep -rq "sk-live-9999" "$WORK/rpbk" 2>/dev/null; then
+	bad "secret survived in the backup versions"
+else
+	ok "secret scrubbed from backup versions too"
+fi
+# The transcript must still parse: every line valid JSON.
+if "$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --list 2>/dev/null | grep -q "leaky"; then
+	ok "transcript still parses after redaction"
+else
+	bad "transcript broken after redaction"
+fi
+
+echo "re-home and redact prompts (m and x)"
+launch
+send m
+wait_for "Re-home this session" 5
+assert_present "m opens the re-home prompt" "Re-home this session"
+assert_present "re-home prompt shows the destination preview" "new dir:"
+send Escape
+wait_for "re-home cancelled" 5
+assert_present "esc cancels re-home" "re-home cancelled"
+send x
+wait_for "Find & replace" 5
+assert_present "x opens the redact prompt" "Find & replace"
+assert_present "redact prompt has both fields" "replace:"
+send Escape
+
+echo "tmux window naming (--name-windows)"
+# A private tmux server whose pane IS the fake claude process (exec
+# replaces the shell), so the pid in the registry is the pane pid and
+# window naming has a real window to act on.
+NS="csbname$$"
+NHOME="$WORK/nhome"
+mkdir -p "$NHOME" "$WORK/nsessions" "$WORK/proj-widgets"
+cp "$(command -v sleep)" "$WORK/claude-win"
+"$TMUX_BIN" -L "$NS" kill-server 2>/dev/null
+"$TMUX_BIN" -L "$NS" new-session -d -s w -x 80 -y 24 "$WORK/claude-win 120"
+sleep 0.5
+NPID=$("$TMUX_BIN" -L "$NS" list-panes -a -F '#{pane_pid}' | head -1)
+printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","version":"9.9.9","updatedAt":1}\n' \
+	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
+# Dry run must report the change without making it.
+if CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows --dry-run 2>/dev/null | grep -q "proj-widgets"; then
+	ok "--name-windows --dry-run previews the rename"
+else
+	bad "--name-windows --dry-run showed nothing"
+fi
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" != "proj-widgets" ]; then
+	ok "dry run left the window name alone"
+else
+	bad "dry run renamed the window"
+fi
+CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows >/dev/null 2>&1
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "proj-widgets" ]; then
+	ok "--name-windows renamed the window after the project"
+else
+	bad "window not renamed (got '$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)')"
+fi
+# tmux must stop auto-renaming, or the name reverts on the next command.
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{?automatic-rename,on,off}' | head -1)" = "off" ]; then
+	ok "automatic-rename disabled so the name sticks"
+else
+	bad "automatic-rename still on; name would revert"
+fi
+# Running it again is a no-op, not churn.
+if CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows 2>/dev/null | grep -q "nothing to rename"; then
+	ok "re-running --name-windows is a no-op"
+else
+	bad "--name-windows renamed an already-correct window"
+fi
+# A name the user chose by hand must survive: tmux records that as
+# automatic-rename off, and clobbering it would be a downgrade.
+"$TMUX_BIN" -L "$NS" rename-window -t w:0 "my-own-name"
+CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows >/dev/null 2>&1
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "my-own-name" ]; then
+	ok "hand-named window left alone"
+else
+	bad "hand-named window was clobbered"
+fi
+# ...unless explicitly forced.
+CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows --force >/dev/null 2>&1
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "proj-widgets" ]; then
+	ok "--force renames a hand-named window"
+else
+	bad "--force did not rename the hand-named window"
+fi
+"$TMUX_BIN" -L "$NS" kill-server 2>/dev/null
+rm -rf "$NHOME" "$WORK/nsessions"
+
 echo "resume hand-off (enter)"
 launch # alpha selected at top
 send Enter

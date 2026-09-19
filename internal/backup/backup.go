@@ -357,6 +357,45 @@ func Versions(dest, id string) []Version {
 	return deduped
 }
 
+// ResealVersion renames a version file so its embedded content hash
+// matches what the file now holds, returning the new path (or the old one
+// if it already matched).
+//
+// Versions are immutable by design, so this exists for the one case that
+// must be able to reach into history: redacting a secret. Rewriting a
+// version's bytes leaves its <mtime>-<hash> name lying about its content,
+// which would break dedup — the stale hash would keep matching the old
+// content and suppress future stores. Resealing restores that invariant.
+// The original mtime is preserved so version ordering is unaffected.
+func ResealVersion(path string) (string, error) {
+	sum, err := sha256File(path)
+	if err != nil {
+		return path, err
+	}
+	if VersionID(path) == sum[:12] {
+		return path, nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return path, err
+	}
+	dest := filepath.Join(filepath.Dir(path), versionName(fi.ModTime(), sum))
+	if dest == path {
+		return path, nil
+	}
+	if err := os.Rename(path, dest); err != nil {
+		return path, err
+	}
+	return dest, nil
+}
+
+// RelinkCurrent repoints the flat <id>.jsonl for a session at the newest
+// version in its directory, after the versions have been edited.
+func RelinkCurrent(flat string) error {
+	id := strings.TrimSuffix(filepath.Base(flat), ".jsonl")
+	return updateCurrent(flat, filepath.Join(filepath.Dir(flat), id+".versions"))
+}
+
 // listVersions returns the version files in vdir with their sizes and
 // mtimes.
 func listVersions(vdir string) []Version {

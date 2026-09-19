@@ -21,6 +21,7 @@ import (
 	"github.com/bdols/claude-session-browser/internal/audit"
 	"github.com/bdols/claude-session-browser/internal/backup"
 	"github.com/bdols/claude-session-browser/internal/live"
+	"github.com/bdols/claude-session-browser/internal/rewrite"
 	"github.com/bdols/claude-session-browser/internal/session"
 )
 
@@ -35,6 +36,8 @@ const (
 	modeVersions
 	modeRunning
 	modeCommands
+	modeRehome
+	modeReplace
 )
 
 var (
@@ -53,7 +56,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · / filter · s search · b backup · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · t name win · / filter · s search · b backup · m re-home · x redact · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -111,6 +114,16 @@ type Model struct {
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
 
+	// Re-home (move a session to another project directory) and redact
+	// (literal text substitution) both act on opOn, captured when the
+	// prompt opens so a rescan can't move the target under them.
+	opOn        *session.Session
+	rehomeInput textinput.Model
+	replaceFrom textinput.Model
+	replaceTo   textinput.Model
+	replaceOnTo bool // which of the two redact fields has focus
+	replaceAll  bool // also rewrite backup versions
+
 	// transcripts caches parsed session files for the preview pane,
 	// keyed by file path; cleared on every rescan.
 	transcripts map[string][]session.Entry
@@ -135,7 +148,23 @@ func New(root, backupDir string, autoBackup bool) Model {
 	ci.Placeholder = "filter commands…"
 	ci.Prompt = "/"
 	ci.CharLimit = 128
-	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup, filter: ti, search: si, cmdFilter: ci, live: map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
+	hi := textinput.New()
+	hi.Placeholder = "/absolute/path/to/moved/project"
+	hi.Prompt = "new dir: "
+	hi.CharLimit = 512
+	rf := textinput.New()
+	rf.Placeholder = "text to find (literal)"
+	rf.Prompt = "find:    "
+	rf.CharLimit = 512
+	rt := textinput.New()
+	rt.Placeholder = "[REDACTED]"
+	rt.Prompt = "replace: "
+	rt.CharLimit = 512
+	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup,
+		filter: ti, search: si, cmdFilter: ci,
+		rehomeInput: hi, replaceFrom: rf, replaceTo: rt,
+		replaceAll: true,
+		live:       map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -372,6 +401,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case modeRehome:
+		return m.handleRehomeKey(msg)
+
+	case modeReplace:
+		return m.handleReplaceKey(msg)
+
 	case modeConfirmRestore:
 		switch msg.String() {
 		case "ctrl+c":
@@ -539,6 +574,35 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, backupCmd(m.root, m.backupDir)
 			}
 			m.status = "no backup location available"
+		case "t":
+			if s := m.selected(); s != nil {
+				if ls, ok := m.live[s.ID]; ok {
+					m.status = m.renameOne(ls)
+				} else {
+					m.status = "session isn't running — nothing to name"
+				}
+				return m, liveCmd()
+			}
+		case "T":
+			m.status = m.renameAll()
+			return m, liveCmd()
+		case "m":
+			if s := m.selected(); s != nil {
+				m.opOn = s
+				m.mode = modeRehome
+				m.rehomeInput.SetValue("")
+				m.rehomeInput.Focus()
+			}
+		case "x":
+			if s := m.selected(); s != nil {
+				m.opOn = s
+				m.mode = modeReplace
+				m.replaceFrom.SetValue("")
+				m.replaceTo.SetValue("")
+				m.replaceOnTo = false
+				m.replaceFrom.Focus()
+				m.replaceTo.Blur()
+			}
 		case "d":
 			if m.selected() != nil {
 				m.mode = modeConfirmDelete
@@ -605,12 +669,241 @@ func (m Model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.status = "rescanning…"
 		return m, tea.Batch(scanCmd(m.root), liveCmd())
+	case "t":
+		if rr := m.selectedRunning(); rr != nil {
+			m.status = m.renameOne(rr.Session)
+			return m, liveCmd()
+		}
+	case "T":
+		m.status = m.renameAll()
+		return m, liveCmd()
+	case "u":
+		if rr := m.selectedRunning(); rr != nil {
+			if rr.TmuxPane == "" {
+				m.status = "not in tmux"
+			} else if err := live.RestoreAutoRename(rr.TmuxPane); err != nil {
+				m.err = "undo rename failed: " + err.Error()
+			} else {
+				m.status = "restored automatic naming for " + rr.TmuxWindow
+			}
+			return m, liveCmd()
+		}
 	case "enter", "w", "l", "right":
 		if rr := m.selectedRunning(); rr != nil {
 			return m.switchToLive(rr.Session)
 		}
 	}
 	return m, nil
+}
+
+// renameOne names the tmux window holding one running session after its
+// project, reporting what happened for the status line.
+// Naming one window is an explicit request, so it overrides a hand-set
+// name — unlike the bulk rename, which leaves those alone.
+func (m Model) renameOne(ls live.Session) string {
+	if ls.TmuxPane == "" {
+		return "session isn't in a tmux window"
+	}
+	name := live.ProjectName(ls.CWD)
+	if name == ls.TmuxLabel {
+		return fmt.Sprintf("%s is already named %q", ls.TmuxWindow, name)
+	}
+	if err := live.RenameWindow(ls.TmuxPane, name); err != nil {
+		return "rename failed: " + err.Error()
+	}
+	return fmt.Sprintf("renamed %s → %q", ls.TmuxWindow, name)
+}
+
+// sessionTitles maps session id to title, so window naming can
+// disambiguate several windows that share a project.
+func (m Model) sessionTitles() map[string]string {
+	titles := make(map[string]string, len(m.sessions))
+	for _, s := range m.sessions {
+		titles[s.ID] = s.Title
+	}
+	return titles
+}
+
+// renameAll names every tmux window holding a Claude session after the
+// project(s) running in it, leaving hand-named windows alone.
+func (m Model) renameAll() string {
+	plan := live.PlanRenames(m.live, m.sessionTitles(), false)
+	if len(plan) == 0 {
+		return "no windows to rename (already named, or named by hand — t forces one)"
+	}
+	var done, failed int
+	for _, r := range plan {
+		if live.RenameWindow(r.Pane, r.New) != nil {
+			failed++
+			continue
+		}
+		done++
+	}
+	if failed > 0 {
+		return fmt.Sprintf("renamed %d window(s), %d failed", done, failed)
+	}
+	return fmt.Sprintf("renamed %d tmux window(s) after their projects", done)
+}
+
+// handleRehomeKey drives the re-home prompt: type the directory the
+// project moved to, enter to copy the session there.
+func (m Model) handleRehomeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.mode = modeList
+		m.rehomeInput.Blur()
+		m.opOn = nil
+		m.status = "re-home cancelled"
+		return m, nil
+	case "enter":
+		s := m.opOn
+		dir := strings.TrimSpace(m.rehomeInput.Value())
+		m.mode = modeList
+		m.rehomeInput.Blur()
+		m.opOn = nil
+		if s == nil || dir == "" {
+			return m, nil
+		}
+		dir = expandHome(dir)
+		// Capture the current state first: re-homing copies rather than
+		// moves, but a stored version makes the whole thing reversible.
+		if m.backupDir != "" {
+			backup.Sync(m.root, m.backupDir)
+		}
+		res, err := rewrite.Rehome(session.DefaultRoot(), s.Path, s.ID, dir, false)
+		if err != nil {
+			m.err = "re-home failed: " + err.Error()
+			return m, nil
+		}
+		note := fmt.Sprintf("re-homed to %s (%d/%d records)", shortPath(dir), res.Changed, res.Records)
+		if res.Memory != "" {
+			note += " + memory"
+		}
+		if len(res.OldCWDs) > 0 {
+			if added, err := rewrite.AdoptProjectConfig(res.OldCWDs[0], dir); err == nil && len(added) > 0 {
+				note += fmt.Sprintf(" + %d config key(s)", len(added))
+			}
+		}
+		m.status = note
+		return m, scanCmd(m.root)
+	default:
+		var cmd tea.Cmd
+		m.rehomeInput, cmd = m.rehomeInput.Update(msg)
+		return m, cmd
+	}
+}
+
+// handleReplaceKey drives the redact prompt: a literal find/replace over
+// the session's transcript, and (by default) its backup versions too,
+// since a secret left in the version history isn't redacted at all.
+func (m Model) handleReplaceKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.mode = modeList
+		m.replaceFrom.Blur()
+		m.replaceTo.Blur()
+		m.opOn = nil
+		m.status = "replace cancelled"
+		return m, nil
+	case "tab", "shift+tab", "up", "down":
+		m.replaceOnTo = !m.replaceOnTo
+		if m.replaceOnTo {
+			m.replaceFrom.Blur()
+			m.replaceTo.Focus()
+		} else {
+			m.replaceTo.Blur()
+			m.replaceFrom.Focus()
+		}
+		return m, nil
+	case "ctrl+a":
+		m.replaceAll = !m.replaceAll
+		return m, nil
+	case "enter":
+		if !m.replaceOnTo {
+			// First enter moves to the replacement field rather than
+			// firing, so a half-typed operation can't run.
+			m.replaceOnTo = true
+			m.replaceFrom.Blur()
+			m.replaceTo.Focus()
+			return m, nil
+		}
+		s := m.opOn
+		from, to := m.replaceFrom.Value(), m.replaceTo.Value()
+		m.mode = modeList
+		m.replaceFrom.Blur()
+		m.replaceTo.Blur()
+		m.opOn = nil
+		if s == nil || from == "" {
+			m.status = "nothing to replace"
+			return m, nil
+		}
+		total, files, err := m.runReplace(s.ID, from, to)
+		if err != nil {
+			m.err = "replace failed: " + err.Error()
+			return m, nil
+		}
+		if total == 0 {
+			m.status = fmt.Sprintf("no occurrences of %q found", from)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("replaced %d occurrence(s) across %d file(s)", total, files)
+		return m, scanCmd(m.root)
+	default:
+		var cmd tea.Cmd
+		if m.replaceOnTo {
+			m.replaceTo, cmd = m.replaceTo.Update(msg)
+		} else {
+			m.replaceFrom, cmd = m.replaceFrom.Update(msg)
+		}
+		return m, cmd
+	}
+}
+
+// runReplace applies a literal substitution to a session's live
+// transcript and, when replaceAll is set, every stored backup version.
+// Version files are resealed afterwards so their embedded content hashes
+// stay honest, and the flat current file is repointed.
+func (m Model) runReplace(id, from, to string) (total, files int, err error) {
+	targets, _ := filepath.Glob(filepath.Join(session.DefaultRoot(), "*", id+".jsonl"))
+	if m.replaceAll && m.restoreDir() != "" {
+		for _, v := range backup.Versions(m.restoreDir(), id) {
+			targets = append(targets, v.Path)
+		}
+		flats, _ := filepath.Glob(filepath.Join(m.restoreDir(), "*", id+".jsonl"))
+		targets = append(targets, flats...)
+	}
+	for _, t := range targets {
+		res, err := rewrite.Replace(t, from, to)
+		if err != nil {
+			return total, files, err
+		}
+		if res.Replacements == 0 {
+			continue
+		}
+		total += res.Replacements
+		files++
+		if strings.Contains(t, ".versions"+string(filepath.Separator)) {
+			backup.ResealVersion(t)
+		}
+	}
+	if m.replaceAll && m.restoreDir() != "" {
+		flats, _ := filepath.Glob(filepath.Join(m.restoreDir(), "*", id+".jsonl"))
+		for _, f := range flats {
+			backup.RelinkCurrent(f)
+		}
+	}
+	return total, files, nil
+}
+
+// expandHome resolves a leading ~ so the prompt accepts the paths people
+// actually type.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
+		}
+	}
+	return p
 }
 
 // handleCommandsKey drives the tool-call audit view.
@@ -1130,9 +1423,97 @@ func (m Model) View() string {
 		return m.viewRunning()
 	case modeCommands:
 		return m.viewCommands()
+	case modeRehome:
+		return m.viewRehome()
+	case modeReplace:
+		return m.viewReplace()
 	default:
 		return m.viewList()
 	}
+}
+
+// viewRehome prompts for the directory a project moved to. Claude Code
+// finds resumable sessions only under the munged name of the current
+// directory, so a moved project orphans its sessions until they are
+// copied across and their recorded cwd rewritten.
+func (m Model) viewRehome() string {
+	s := m.opOn
+	if s == nil {
+		return m.viewList()
+	}
+	label := styleDim.Render
+	row := func(k, v string) string {
+		return fmt.Sprintf("%s  %s", label(fmt.Sprintf("%8s", k)), v)
+	}
+	dest := strings.TrimSpace(m.rehomeInput.Value())
+	preview := label("(type an absolute path)")
+	if dest != "" {
+		preview = shortPath(filepath.Join(session.DefaultRoot(), rewrite.MungeDir(expandHome(dest))))
+	}
+	lines := []string{
+		styleTitle.Render("Re-home this session"),
+		"",
+		styleDim.Render("Copies the transcript into the project directory for a new"),
+		styleDim.Render("path and rewrites the recorded cwd, so Claude Code lists and"),
+		styleDim.Render("resumes it there. The original copy is left untouched."),
+		"",
+		row("session", s.ID),
+		row("title", truncate(s.Title, 48)),
+		row("now at", shortPath(s.CWD)),
+		"",
+		" " + m.rehomeInput.View(),
+		row("lands in", preview),
+		"",
+		styleStatus.Render("enter  re-home    ·    esc  cancel"),
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// viewReplace prompts for a literal find/replace across a session — for
+// scrubbing a secret that was pasted into a chat, or fixing a stale path.
+func (m Model) viewReplace() string {
+	s := m.opOn
+	if s == nil {
+		return m.viewList()
+	}
+	label := styleDim.Render
+	row := func(k, v string) string {
+		return fmt.Sprintf("%s  %s", label(fmt.Sprintf("%8s", k)), v)
+	}
+	scope := "live transcript only"
+	if m.replaceAll {
+		scope = fmt.Sprintf("live transcript + %d backup version(s)",
+			len(backup.Versions(m.restoreDir(), s.ID)))
+	}
+	lines := []string{
+		styleTitle.Render("Find & replace in this session"),
+		"",
+		styleDim.Render("A literal substitution across the transcript. Every changed"),
+		styleDim.Render("record is re-parsed as JSON first — if a replacement would"),
+		styleDim.Render("break the file, nothing is written."),
+		"",
+		row("session", s.ID),
+		row("title", truncate(s.Title, 48)),
+		"",
+		" " + m.replaceFrom.View(),
+		" " + m.replaceTo.View(),
+		"",
+		row("scope", scope),
+		row("", styleDim.Render("a secret left in the backups isn't redacted — ctrl+a toggles")),
+		"",
+		styleStatus.Render("tab  switch field  ·  enter  next/apply  ·  ctrl+a  scope  ·  esc  cancel"),
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // viewCommands renders the tool-call audit: a chronological log of every
@@ -1254,7 +1635,7 @@ func (m Model) viewRunning() string {
 	} else {
 		b.WriteString(styleDim.Render(" "+guide) + "\n")
 	}
-	b.WriteString(styleStatus.Render(" ↑/↓ select · enter/w switch to session · r rescan · esc back"))
+	b.WriteString(styleStatus.Render(" ↑/↓ select · enter/w switch · t name window · T name all · u undo name · r rescan · esc back"))
 	return b.String()
 }
 

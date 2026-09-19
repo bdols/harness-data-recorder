@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeRegistry writes a ~/.claude/sessions-style registry file.
@@ -149,5 +150,162 @@ func TestSwitchTmux(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(active)); got != "0" {
 		t.Errorf("active window = %q after switch, want 0", got)
+	}
+}
+
+func TestPlanRenamesUsesProjectNames(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/var/mnt/videos/Clips", TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+		"b": {SessionID: "b", CWD: "/home/x/code/api", TmuxPane: "%2", TmuxWindow: "0:2", TmuxLabel: "zsh"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 2 {
+		t.Fatalf("got %d renames, want 2: %+v", len(plan), plan)
+	}
+	got := map[string]string{}
+	for _, r := range plan {
+		got[r.Window] = r.New
+	}
+	if got["0:1"] != "Clips" || got["0:2"] != "api" {
+		t.Errorf("names = %v, want 0:1=Clips 0:2=api", got)
+	}
+}
+
+// Several Claude processes commonly share one window; tmux names windows,
+// not panes, so the window gets one combined name.
+func TestPlanRenamesCombinesSharedWindow(t *testing.T) {
+	newer := time.Now()
+	older := newer.Add(-time.Hour)
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/alpha", TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude", UpdatedAt: newer},
+		"b": {SessionID: "b", CWD: "/p/beta", TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude", UpdatedAt: older},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 {
+		t.Fatalf("got %d renames, want 1: %+v", len(plan), plan)
+	}
+	// Most recently active session names the window first.
+	if plan[0].New != "alpha+beta" {
+		t.Errorf("name = %q, want alpha+beta", plan[0].New)
+	}
+}
+
+// Two sessions in the same project must not produce "proj+proj".
+func TestPlanRenamesDedupesSameProject(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/same", TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude"},
+		"b": {SessionID: "b", CWD: "/p/same", TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 || plan[0].New != "same" {
+		t.Fatalf("plan = %+v, want one rename to \"same\"", plan)
+	}
+}
+
+// A window already named after its project is left alone, so repeated
+// runs are no-ops rather than churn.
+func TestPlanRenamesSkipsCorrectNames(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/done", TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "done"},
+	}
+	if plan := PlanRenames(sessions, nil, false); len(plan) != 0 {
+		t.Errorf("plan = %+v, want empty", plan)
+	}
+}
+
+// Sessions outside tmux have no window to rename.
+func TestPlanRenamesIgnoresNonTmux(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/x"},
+	}
+	if plan := PlanRenames(sessions, nil, false); len(plan) != 0 {
+		t.Errorf("plan = %+v, want empty", plan)
+	}
+}
+
+func TestProjectName(t *testing.T) {
+	cases := map[string]string{
+		"/var/mnt/videos/Clips":  "Clips",
+		"/var/mnt/videos/Clips/": "Clips",
+		"/":                      "root",
+		"":                       "root",
+	}
+	for in, want := range cases {
+		if got := ProjectName(in); got != want {
+			t.Errorf("ProjectName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A window the user named by hand (automatic-rename off) is left alone:
+// clobbering a deliberate name with a generic project name is a
+// downgrade. force overrides that.
+func TestPlanRenamesRespectsHandNamedWindows(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/proj", TmuxPane: "%1", TmuxWindow: "0:1",
+			TmuxLabel: "jetson", TmuxNamed: true},
+	}
+	if plan := PlanRenames(sessions, nil, false); len(plan) != 0 {
+		t.Errorf("plan = %+v, want empty (window was named by hand)", plan)
+	}
+	plan := PlanRenames(sessions, nil, true)
+	if len(plan) != 1 || plan[0].New != "proj" {
+		t.Errorf("force plan = %+v, want one rename to \"proj\"", plan)
+	}
+}
+
+// Several windows in one project would otherwise all get the same name,
+// which is no more useful than the "claude" they replace.
+func TestPlanRenamesDisambiguatesCollisions(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/home/x/obsidian", TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+		"b": {SessionID: "b", CWD: "/home/x/obsidian", TmuxPane: "%2", TmuxWindow: "0:2", TmuxLabel: "claude"},
+	}
+	labels := map[string]string{"a": "Dub pack creation", "b": "Sonarr newsgroup options"}
+	plan := PlanRenames(sessions, labels, false)
+	if len(plan) != 2 {
+		t.Fatalf("got %d renames, want 2: %+v", len(plan), plan)
+	}
+	names := map[string]bool{}
+	for _, r := range plan {
+		if r.New == "obsidian" {
+			t.Errorf("ambiguous name survived: %+v", plan)
+		}
+		names[r.New] = true
+	}
+	if len(names) != 2 {
+		t.Errorf("names collided after disambiguation: %+v", plan)
+	}
+}
+
+// With no titles to draw on there is nothing to disambiguate with; the
+// plain project name is still better than "claude".
+func TestPlanRenamesCollisionWithoutTitles(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/p/dup", TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+		"b": {SessionID: "b", CWD: "/p/dup", TmuxPane: "%2", TmuxWindow: "0:2", TmuxLabel: "claude"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 2 {
+		t.Fatalf("got %d renames, want 2: %+v", len(plan), plan)
+	}
+	for _, r := range plan {
+		if r.New != "dup" {
+			t.Errorf("name = %q, want dup", r.New)
+		}
+	}
+}
+
+func TestSlug(t *testing.T) {
+	cases := map[string]string{
+		"Dub pack creation":                    "dub-pack",
+		"Plan & implement the session browser": "plan-implement",
+		"":                                     "",
+		"!!!":                                  "",
+	}
+	for in, want := range cases {
+		if got := slug(in); got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/bdols/claude-session-browser/internal/audit"
 	"github.com/bdols/claude-session-browser/internal/backup"
 	"github.com/bdols/claude-session-browser/internal/live"
+	"github.com/bdols/claude-session-browser/internal/rewrite"
 	"github.com/bdols/claude-session-browser/internal/session"
 	"github.com/bdols/claude-session-browser/internal/ui"
 )
@@ -32,6 +33,15 @@ func main() {
 	running := flag.Bool("running", false, "list currently-running Claude sessions (flagging reaped ones) and exit")
 	export := flag.String("export", "", "export session `id` as Markdown to stdout and exit (uses the most complete copy: live or backup)")
 	commands := flag.Bool("commands", false, "audit every tool call across sessions (live + backups) and exit; optional filter args match tool/detail/project")
+	rehome := flag.String("rehome", "", "re-home session `id` into another directory (use with --to); copies the transcript so Claude finds it at the new path")
+	to := flag.String("to", "", "destination directory for --rehome, or the replacement text for --replace")
+	adopt := flag.Bool("adopt-config", false, "with --rehome, also copy the old path's trust/tool/MCP settings in ~/.claude.json to the new path")
+	force := flag.Bool("force", false, "with --rehome, overwrite an existing transcript at the destination; with --name-windows, also rename windows you named by hand")
+	replace := flag.String("replace", "", "session `id` to run a literal text substitution over (use with --from and --to); for redacting secrets")
+	from := flag.String("from", "", "text to search for with --replace")
+	allVersions := flag.Bool("all-versions", false, "with --replace, also rewrite every stored backup version (needed for a secret to be truly gone)")
+	nameWindows := flag.Bool("name-windows", false, "rename each tmux window holding a Claude session after the project running in it, and exit")
+	dryRun := flag.Bool("dry-run", false, "with --name-windows, show what would be renamed without changing anything")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -54,6 +64,25 @@ func main() {
 
 	if *commands {
 		printCommands(*root, *backupDir, flag.Args())
+		return
+	}
+
+	if *nameWindows {
+		nameTmuxWindows(*root, *dryRun, *force)
+		return
+	}
+
+	if *rehome != "" {
+		if err := rehomeSession(*root, *backupDir, *rehome, *to, *adopt, *force); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
+	if *replace != "" {
+		if err := replaceInSession(*root, *backupDir, *replace, *from, *to, *allVersions); err != nil {
+			fatal(err)
+		}
 		return
 	}
 
@@ -132,6 +161,157 @@ func exportMarkdown(root, backupDir, id string) error {
 	}
 	fmt.Print(md)
 	return nil
+}
+
+// nameTmuxWindows renames every tmux window holding a Claude session
+// after the project running in it. With several long-lived sessions in
+// tmux, the default names all read "claude" or "zsh", which says nothing
+// about which one you want.
+func nameTmuxWindows(root string, dryRun, force bool) {
+	titles := map[string]string{}
+	if sessions, err := session.Scan(root); err == nil {
+		for _, s := range sessions {
+			titles[s.ID] = s.Title
+		}
+	}
+	plan := live.PlanRenames(live.Scan(), titles, force)
+	if len(plan) == 0 {
+		fmt.Println("nothing to rename: no Claude sessions in tmux, every window is already named after its project, " +
+			"or the remaining windows were named by hand (--force renames those too)")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "WINDOW\tFROM\tTO")
+	failed := 0
+	for _, r := range plan {
+		status := ""
+		if !dryRun {
+			if err := live.RenameWindow(r.Pane, r.New); err != nil {
+				status, failed = "\t(failed)", failed+1
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s%s\n", r.Window, r.Old, r.New, status)
+	}
+	w.Flush()
+	switch {
+	case dryRun:
+		fmt.Printf("\n%d window(s) would be renamed (dry run)\n", len(plan))
+	case failed > 0:
+		fmt.Printf("\nrenamed %d window(s), %d failed\n", len(plan)-failed, failed)
+	default:
+		fmt.Printf("\nrenamed %d window(s)\n", len(plan))
+	}
+}
+
+// rehomeSession copies a session's transcript into the project directory
+// for a new path, rewriting the recorded cwd, so a project that moved on
+// disk keeps its sessions resumable from the new location.
+func rehomeSession(root, backupDir, id, dir string, adopt, force bool) error {
+	if dir == "" {
+		return fmt.Errorf("--rehome needs --to <directory>")
+	}
+	src := transcriptPath(root, backupDir, id)
+	if src == "" {
+		return fmt.Errorf("session %s not found under %s or backups", id, root)
+	}
+	// Snapshot before touching anything, so the pre-rehome state is a
+	// restorable version even though the copy itself is non-destructive.
+	if backupDir != "" {
+		backup.Sync(root, backupDir)
+	}
+	res, err := rewrite.Rehome(root, src, id, dir, force)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("re-homed %s → %s\n", id, res.Dest)
+	fmt.Printf("  %d/%d records had their cwd rewritten to %s\n", res.Changed, res.Records, dir)
+	if len(res.OldCWDs) > 0 {
+		fmt.Printf("  replaced: %s\n", strings.Join(res.OldCWDs, ", "))
+	}
+	if res.Memory != "" {
+		fmt.Printf("  copied project memory → %s\n", res.Memory)
+	}
+	if adopt {
+		if len(res.OldCWDs) == 0 {
+			fmt.Println("  no previous cwd to adopt config from")
+		} else {
+			added, err := rewrite.AdoptProjectConfig(res.OldCWDs[0], dir)
+			switch {
+			case err != nil:
+				fmt.Fprintln(os.Stderr, "  config not adopted:", err)
+			case len(added) == 0:
+				fmt.Println("  config already present at the new path")
+			default:
+				fmt.Printf("  adopted config keys: %s\n", strings.Join(added, ", "))
+			}
+		}
+	}
+	fmt.Printf("resume it with: cd %s && claude --resume %s\n", dir, id)
+	return nil
+}
+
+// replaceInSession runs a literal substitution across a session's
+// transcript — for scrubbing a secret that was pasted into a chat, or
+// fixing a path that changed. With allVersions it also rewrites the backup
+// history, which is what a redaction actually requires.
+func replaceInSession(root, backupDir, id, from, to string, allVersions bool) error {
+	if from == "" {
+		return fmt.Errorf("--replace needs --from <text> (and --to <replacement>)")
+	}
+	targets, _ := filepath.Glob(filepath.Join(root, "*", id+".jsonl"))
+	if allVersions && backupDir != "" {
+		for _, v := range backup.Versions(backupDir, id) {
+			targets = append(targets, v.Path)
+		}
+		flat, _ := filepath.Glob(filepath.Join(backupDir, "*", id+".jsonl"))
+		targets = append(targets, flat...)
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("session %s not found under %s", id, root)
+	}
+	total, files := 0, 0
+	for _, t := range targets {
+		res, err := rewrite.Replace(t, from, to)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t, err)
+		}
+		if res.Replacements == 0 {
+			continue
+		}
+		total += res.Replacements
+		files++
+		fmt.Printf("%s: %d replacement(s) in %d record(s)\n", t, res.Replacements, res.Records)
+		// A rewritten version file's name still carries the old content
+		// hash; reseal it so dedup keeps working.
+		if strings.Contains(t, ".versions"+string(filepath.Separator)) {
+			if _, err := backup.ResealVersion(t); err != nil {
+				fmt.Fprintln(os.Stderr, "  warning: could not reseal version:", err)
+			}
+		}
+	}
+	if files == 0 {
+		fmt.Printf("no occurrences of %q in %d file(s)\n", from, len(targets))
+		return nil
+	}
+	// Version files were renamed; repoint the flat current file.
+	if allVersions && backupDir != "" {
+		for _, flat := range mustGlob(filepath.Join(backupDir, "*", id+".jsonl")) {
+			if err := backup.RelinkCurrent(flat); err != nil {
+				fmt.Fprintln(os.Stderr, "  warning: could not relink current:", err)
+			}
+		}
+	}
+	fmt.Printf("%d replacement(s) across %d file(s)\n", total, files)
+	if !allVersions && backupDir != "" && len(backup.Versions(backupDir, id)) > 0 {
+		fmt.Println("note: backup versions still contain the original text; " +
+			"re-run with --all-versions to scrub those too")
+	}
+	return nil
+}
+
+func mustGlob(pattern string) []string {
+	m, _ := filepath.Glob(pattern)
+	return m
 }
 
 // transcriptPath returns the largest available transcript for id among

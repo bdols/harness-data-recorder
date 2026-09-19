@@ -44,9 +44,12 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `e` | export the session's transcript to a Markdown file in the current directory (in the version browser, exports the selected version) |
 | `c` | audit every tool call (Bash, Edit, Read, …) across all sessions, newest first, with `/` to filter and `enter` to jump to the owning session |
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
+| `t` / `T` | name the selected session's tmux window after its project / name all of them (`u` in the running view undoes it) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
 | `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
 | `b` | back up sessions now |
+| `m` | re-home the session into another directory (for a project that moved on disk) |
+| `x` | find & replace literal text in the session — redacting a pasted secret, or fixing a stale path |
 | `d` | delete session file (with confirmation) |
 | `r` | rescan |
 | `q` | quit |
@@ -94,6 +97,54 @@ csb --commands rm > audit.txt  # greppable / redirectable
 ```
 
 This is a durable, atuin-style history of Claude's actions that survives Claude Code's 30-day transcript cleanup (because the backups do).
+
+## Naming tmux windows after their project
+
+Run several Claude sessions in tmux and every window is called `claude` or `zsh`, which tells you nothing about which is which. csb already knows the project behind each running session, so it can name the windows for you:
+
+```sh
+csb --name-windows --dry-run   # preview: WINDOW · FROM · TO
+csb --name-windows             # apply
+csb --name-windows --force     # include windows you named by hand
+```
+
+In the TUI, `t` names the selected session's window, `T` names all of them, and `u` (in the running view) hands a window back to tmux's automatic naming.
+
+Windows are the unit, not sessions — several Claude processes often share one window, and tmux names windows. A shared window gets the projects joined with `+`, most recently active first.
+
+Two rules keep this useful rather than merely tidy:
+
+- **Names you chose yourself are left alone.** tmux records a manual rename as `automatic-rename off`, which is a reliable signal of intent — replacing a deliberate `jetson` with a generic project name is a downgrade. `--force` (or `t` on a single session, which is an explicit request) overrides it.
+- **Ambiguous names get qualified.** Nine windows all named `obsidian` are no more informative than the `claude` they replaced, so when a project name would collide csb appends a short slug of the session's title: `obsidian-check-ebook`, `obsidian-evaluate-gemma`.
+
+Renaming turns tmux's `automatic-rename` off for that window, which is what makes the name stick instead of reverting to the running command; `u` / `set-window-option automatic-rename on` reverses it. Re-running is a no-op when everything is already named correctly.
+
+## Re-homing a moved project
+
+Claude Code finds resumable sessions **only** in the directory derived from your *current* working directory: `/var/mnt/videos/Clips` becomes `~/.claude/projects/-var-mnt-videos-Clips`. Move or rename a project and its sessions stay behind under the old name — invisible from the new path, and absent from the resume/agents picker. Worse, if you move a directory out from under a *running* Claude, it notices, `chdir`s to `/tmp`, and every record it writes from then on claims the session lives in `/tmp`.
+
+Nothing is lost in either case; the transcript is just filed under a name that no longer matches. `m` (or `--rehome`) files it correctly:
+
+```sh
+csb --rehome <id> --to /new/path/to/project
+csb --rehome <id> --to /new/path --adopt-config   # also carry over trust/tools/MCP settings
+```
+
+It **copies** the transcript into the project directory for the new path (the original is left untouched), rewrites every record's recorded `cwd`, and brings the project's `memory/` directory along so the resumed session hasn't forgotten anything. With `--adopt-config` it also copies the old path's entry in `~/.claude.json` — `hasTrustDialogAccepted`, `allowedTools`, MCP servers — so you aren't re-approving a project you already trusted. Only keys missing at the new path are filled in; existing values always win. (Claude Code rewrites that file itself, so prefer running this while no session in either directory is live.)
+
+An existing transcript at the destination is never overwritten without `--force`.
+
+## Find & replace in a session
+
+`x` (or `--replace`) runs a **literal** substitution across a session's transcript — for scrubbing a credential that got pasted into a chat, or correcting a path that changed:
+
+```sh
+csb --replace <id> --from 'sk-live-…' --to '[REDACTED]' --all-versions
+```
+
+Every modified record is re-parsed as JSON before anything is written, so a replacement that would corrupt the transcript (an unescaped quote landing inside a string) fails and leaves the file alone.
+
+`--all-versions` matters for redaction: a secret scrubbed from the live file **still sits in the backup version history**, so csb's own durability would otherwise work against you. With the flag, csb rewrites every stored version and re-seals each one's filename hash to match its new content, keeping version dedup honest. The TUI has this on by default (`ctrl+a` toggles it) and reports how many files it touched. Without it, csb tells you the versions still contain the original text.
 
 ### Environment
 
@@ -194,6 +245,9 @@ stateDiagram-v2
     List --> ConfirmDelete: d
     List --> Export: e
     List --> SwitchTmux: w
+    List --> Rehome: m
+    List --> Replace: x
+    List --> List: t · T  (name tmux windows)
 
     Detail --> Inspect: i
     Detail --> Export: e
@@ -212,10 +266,20 @@ stateDiagram-v2
     Versions --> Versions: enter  (blocked: session running)
 
     Running --> SwitchToLive: enter · w · l · →
-    Running --> Running: r (rescan)
+    Running --> Running: r (rescan) · t/T (name windows) · u (undo name)
     Running --> List: esc · q
 
     ConfirmDelete --> List: y (delete) · any (cancel)
+
+    Rehome --> List: enter (copy + rewrite cwd) · esc (cancel)
+
+    state Replace {
+        [*] --> FindField
+        FindField --> ReplaceField: tab · enter
+        ReplaceField --> FindField: tab
+        ReplaceField --> ReplaceField: ctrl+a (toggle backup scope)
+    }
+    Replace --> List: enter on replace field (apply) · esc (cancel)
 
     ConfirmRestore --> Resuming: y (restore ± version, then resume)
     ConfirmRestore --> List: any (cancel) · error
