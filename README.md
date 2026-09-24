@@ -91,10 +91,14 @@ Every command Claude runs is recorded in the transcript as a tool call, so csb c
 Press `c` in the TUI for a searchable log (newest first; `/` filters; `enter` jumps to the owning session), or use the CLI:
 
 ```sh
-csb --commands                 # full audit: TIME · PROJECT · TOOL · DETAIL
-csb --commands git commit      # filter by term(s) — matches tool, detail, or project
+csb --commands                 # full audit: TIME · PROJECT · MODEL · TOOL · SANDBOX · DETAIL
+csb --commands git commit      # filter by term(s) — matches tool, detail, project, or model
+csb --commands sandbox:bypass  # Bash commands run with dangerouslyDisableSandbox
+csb --commands sub: opus       # calls made by Opus subagents
 csb --commands rm > audit.txt  # greppable / redirectable
 ```
+
+**MODEL** is the model that issued the call (`sub:` marks calls from an Agent-tool subagent, read from the session's `subagents/` transcripts — live sessions only, since backups don't store them). **SANDBOX** is `BYPASS` when a Bash command ran with `dangerouslyDisableSandbox` (the value the tool result echoes back, so it reflects what actually took effect) and `default` otherwise. Transcripts don't record whether sandboxing was enabled, so `default` means sandboxed only in projects with `sandbox.enabled` set.
 
 This is a durable, atuin-style history of Claude's actions that survives Claude Code's 30-day transcript cleanup (because the backups do).
 

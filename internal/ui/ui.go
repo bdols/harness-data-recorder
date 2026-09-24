@@ -979,20 +979,12 @@ func (m Model) selectedCommand() *audit.Entry {
 }
 
 // applyCommandFilter narrows commandsAll to rows matching every term in
-// the filter (against tool, detail, and project).
+// the filter (see audit.Entry.Matches).
 func (m *Model) applyCommandFilter() {
 	terms := strings.Fields(strings.ToLower(m.cmdFilter.Value()))
 	m.commands = m.commands[:0]
 	for _, e := range m.commandsAll {
-		hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project)
-		ok := true
-		for _, t := range terms {
-			if !strings.Contains(hay, t) {
-				ok = false
-				break
-			}
-		}
-		if ok {
+		if e.Matches(terms) {
 			m.commands = append(m.commands, e)
 		}
 	}
@@ -1522,10 +1514,10 @@ func (m Model) viewCommands() string {
 	head := styleTitle.Render("Tool-call audit") + "\n" +
 		styleDim.Render(fmt.Sprintf("%d of %d calls across sessions (live + backups)", len(m.commands), len(m.commandsAll)))
 
-	whenW, projW, toolW := 16, 16, 8
-	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %-*s  %-*s  %-s ",
-		whenW, "WHEN", projW, "PROJECT", toolW, "TOOL", "DETAIL"))
-	detailW := m.width - whenW - projW - toolW - 10
+	whenW, projW, modelW, toolW, sbxW := 16, 16, 12, 8, 7
+	header := " " + styleHeader.Render(fmt.Sprintf(" %-*s  %-*s  %-*s  %-*s  %-*s  %-s ",
+		whenW, "WHEN", projW, "PROJECT", modelW, "MODEL", toolW, "TOOL", sbxW, "SANDBOX", "DETAIL"))
+	detailW := m.width - whenW - projW - modelW - toolW - sbxW - 14
 	if detailW < 10 {
 		detailW = 10
 	}
@@ -1547,10 +1539,12 @@ func (m Model) viewCommands() string {
 	b.WriteString(head + "\n" + header + "\n")
 	for i := start; i < end; i++ {
 		e := m.commands[i]
-		body := fmt.Sprintf(" %-*s  %-*s  %-*s  %-s ",
+		body := fmt.Sprintf(" %-*s  %-*s  %-*s  %-*s  %-*s  %-s ",
 			whenW, e.Time.Local().Format("2006-01-02 15:04"),
 			projW, truncate(e.Project, projW),
+			modelW, truncate(e.ModelShort(), modelW),
 			toolW, truncate(e.Tool, toolW),
+			sbxW, e.SandboxLabel(),
 			truncate(e.Detail, detailW))
 		if i == m.commandCursor {
 			body = styleSelected.Render(body)

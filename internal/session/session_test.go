@@ -198,3 +198,51 @@ func TestUnmungeDir(t *testing.T) {
 		t.Errorf("unmungeDir = %q", got)
 	}
 }
+
+// ToolCalls records the issuing model, whether Bash bypassed the sandbox
+// (the tool result's echo wins over the input), and subagent calls.
+func TestToolCallsModelSandboxSubagent(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "sid.jsonl")
+	body := `{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"timestamp":"2026-05-01T10:00:00Z"}
+{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"curl x","dangerouslyDisableSandbox":true}}]},"timestamp":"2026-05-01T10:01:00Z"}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2"}]},"toolUseResult":{"stdout":"","dangerouslyDisableSandbox":false}}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"kubectl get po","dangerouslyDisableSandbox":"true"}}]},"timestamp":"2026-05-01T10:03:00Z"}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3"}]},"toolUseResult":"Error: Exit code 1"}
+{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"tool_use","id":"t4","name":"Read","input":{"file_path":"/x"}}]},"timestamp":"2026-05-01T10:04:00Z"}
+`
+	if err := os.WriteFile(main, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sid", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subBody := `{"type":"assistant","isSidechain":true,"message":{"model":"claude-sonnet-5","content":[{"type":"tool_use","id":"s1","name":"Bash","input":{"command":"grep y"}}]},"timestamp":"2026-05-01T10:02:00Z"}
+`
+	if err := os.WriteFile(filepath.Join(sub, "agent-a1.jsonl"), []byte(subBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ToolCalls(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ToolCall{
+		{Tool: "Bash", Detail: "ls", Model: "claude-opus-5-5", Sandbox: SandboxDefault},
+		{Tool: "Bash", Detail: "curl x", Model: "claude-opus-5-5", Sandbox: SandboxDefault},
+		{Tool: "Bash", Detail: "grep y", Model: "claude-sonnet-5", Sandbox: SandboxDefault, Subagent: true},
+		{Tool: "Bash", Detail: "kubectl get po", Model: "claude-sonnet-4-6", Sandbox: SandboxBypassed},
+		{Tool: "Read", Detail: "/x", Model: "", Sandbox: SandboxNA},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d calls, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		g := got[i]
+		g.Time = time.Time{}
+		if g != w {
+			t.Errorf("call %d = %+v, want %+v", i, g, w)
+		}
+	}
+}

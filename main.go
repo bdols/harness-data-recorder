@@ -338,33 +338,21 @@ func transcriptPath(root, backupDir, id string) string {
 }
 
 // printCommands prints the tool-call audit as a table, newest first,
-// optionally filtered to rows matching all of the given terms (against
-// tool, detail, or project).
+// optionally filtered to rows matching all of the given terms (see
+// audit.Entry.Matches).
 func printCommands(root, backupDir string, terms []string) {
 	entries := audit.Collect(root, backupDir)
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "TIME\tPROJECT\tTOOL\tDETAIL")
+	fmt.Fprintln(w, "TIME\tPROJECT\tMODEL\tTOOL\tSANDBOX\tDETAIL")
 	for _, e := range entries {
-		if !matchesAll(e, terms) {
+		if !e.Matches(terms) {
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			e.Time.Local().Format("2006-01-02 15:04"), e.Project, e.Tool, clip(e.Detail, 200))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			e.Time.Local().Format("2006-01-02 15:04"), e.Project, e.ModelShort(), e.Tool,
+			e.SandboxLabel(), clip(e.Detail, 200))
 	}
 	w.Flush()
-}
-
-func matchesAll(e audit.Entry, terms []string) bool {
-	if len(terms) == 0 {
-		return true
-	}
-	hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project)
-	for _, t := range terms {
-		if !strings.Contains(hay, strings.ToLower(t)) {
-			return false
-		}
-	}
-	return true
 }
 
 // printRunning lists running Claude sessions, reaped ones first, so a

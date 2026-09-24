@@ -20,6 +20,52 @@ type Entry struct {
 	Session string // session id
 	Tool    string
 	Detail  string
+	Model   string // e.g. "claude-opus-5-5"; empty if unrecorded
+	Sandbox session.Sandbox
+	// Subagent is set for calls made by an Agent-tool subagent.
+	Subagent bool
+}
+
+// ModelShort is the model without its "claude-" prefix, marked "sub:"
+// for subagent calls.
+func (e Entry) ModelShort() string {
+	m := strings.TrimPrefix(e.Model, "claude-")
+	if m == "" {
+		m = "?"
+	}
+	if e.Subagent {
+		m = "sub:" + m
+	}
+	return m
+}
+
+// SandboxLabel is "BYPASS" for a Bash call that ran with
+// dangerouslyDisableSandbox, "default" for other Bash calls (sandboxed
+// only if the project enabled it), and "" for other tools.
+func (e Entry) SandboxLabel() string {
+	switch e.Sandbox {
+	case session.SandboxDefault:
+		return "default"
+	case session.SandboxBypassed:
+		return "BYPASS"
+	}
+	return ""
+}
+
+// Matches reports whether every (lowercased) term appears in the entry's
+// tool, detail, project, or model. Bash calls also match
+// "sandbox:default" or "sandbox:bypass", and subagent calls match "sub:".
+func (e Entry) Matches(terms []string) bool {
+	hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project + " " + e.ModelShort())
+	if l := e.SandboxLabel(); l != "" {
+		hay += " sandbox:" + strings.ToLower(l)
+	}
+	for _, t := range terms {
+		if !strings.Contains(hay, strings.ToLower(t)) {
+			return false
+		}
+	}
+	return true
 }
 
 // Collect gathers tool calls from every live session under root plus any
@@ -56,7 +102,8 @@ func callsOf(path, project, id string) []Entry {
 	}
 	out := make([]Entry, 0, len(calls))
 	for _, c := range calls {
-		out = append(out, Entry{Time: c.Time, Project: project, Session: id, Tool: c.Tool, Detail: c.Detail})
+		out = append(out, Entry{Time: c.Time, Project: project, Session: id, Tool: c.Tool, Detail: c.Detail,
+			Model: c.Model, Sandbox: c.Sandbox, Subagent: c.Subagent})
 	}
 	return out
 }

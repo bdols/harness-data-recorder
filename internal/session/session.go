@@ -66,10 +66,12 @@ type usage struct {
 }
 
 type contentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	ID        string          `json:"id"`
+	ToolUseID string          `json:"tool_use_id"`
+	Input     json.RawMessage `json:"input"`
 }
 
 // maxLineSize bounds a single jsonl record; pasted images can make
@@ -402,13 +404,57 @@ func LoadTranscript(path string) ([]Entry, error) {
 // ToolCall is one tool invocation (Bash, Edit, Read, …) from a
 // transcript, for the command/tool audit.
 type ToolCall struct {
-	Time   time.Time
-	Tool   string // tool name, e.g. "Bash", "Edit"
-	Detail string // the salient input (command, file path, pattern, …)
+	Time     time.Time
+	Tool     string  // tool name, e.g. "Bash", "Edit"
+	Detail   string  // the salient input (command, file path, pattern, …)
+	Model    string  // model that issued the call, e.g. "claude-opus-5-5"
+	Sandbox  Sandbox // Bash only: whether the sandbox was bypassed
+	Subagent bool    // issued by a subagent (Agent tool), not the main loop
 }
 
-// ToolCalls extracts every tool invocation from a session file, in order.
+// Sandbox records whether a Bash command bypassed Claude Code's sandbox.
+// Transcripts don't record whether sandboxing was enabled at all, so
+// SandboxDefault means "sandboxed if the project had sandbox.enabled".
+type Sandbox int
+
+const (
+	SandboxNA       Sandbox = iota // not a Bash call
+	SandboxDefault                 // ran under the configured sandbox setting
+	SandboxBypassed                // dangerouslyDisableSandbox took effect
+)
+
+// ToolCalls extracts every tool invocation from a session file, in order,
+// including those made by its subagents (<id>/subagents/*.jsonl beside a
+// live transcript).
 func ToolCalls(path string) ([]ToolCall, error) {
+	out, err := toolCallsFile(path, false)
+	if err != nil {
+		return nil, err
+	}
+	subs, _ := filepath.Glob(filepath.Join(strings.TrimSuffix(path, ".jsonl"), "subagents", "*.jsonl"))
+	if len(subs) == 0 {
+		return out, nil
+	}
+	for _, p := range subs {
+		if calls, err := toolCallsFile(p, true); err == nil {
+			out = append(out, calls...)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
+}
+
+// toolCallLine is the subset of a record ToolCalls needs; toolUseResult is
+// kept out of the shared line struct since it can be large.
+type toolCallLine struct {
+	Type          string          `json:"type"`
+	Timestamp     string          `json:"timestamp"`
+	IsSidechain   bool            `json:"isSidechain"`
+	Message       *message        `json:"message"`
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+}
+
+func toolCallsFile(path string, subagent bool) ([]ToolCall, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -416,28 +462,83 @@ func ToolCalls(path string) ([]ToolCall, error) {
 	defer f.Close()
 
 	var out []ToolCall
+	byID := map[string]int{} // tool_use id → index into out (Bash only)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), maxLineSize)
 	for sc.Scan() {
-		var l line
+		var l toolCallLine
 		if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
 			continue
 		}
-		if l.Message == nil || l.IsSidechain || l.Type != "assistant" {
+		if l.Message == nil || (l.IsSidechain && !subagent) {
 			continue
 		}
-		ts, _ := time.Parse(time.RFC3339, l.Timestamp)
 		var blocks []contentBlock
 		if err := json.Unmarshal(l.Message.Content, &blocks); err != nil {
 			continue
 		}
-		for _, b := range blocks {
-			if b.Type == "tool_use" {
-				out = append(out, ToolCall{Time: ts, Tool: b.Name, Detail: toolDetail(b.Input)})
+		switch l.Type {
+		case "assistant":
+			ts, _ := time.Parse(time.RFC3339, l.Timestamp)
+			model := l.Message.Model
+			if model == "<synthetic>" {
+				model = ""
+			}
+			for _, b := range blocks {
+				if b.Type != "tool_use" {
+					continue
+				}
+				c := ToolCall{Time: ts, Tool: b.Name, Detail: toolDetail(b.Input), Model: model, Subagent: subagent}
+				if b.Name == "Bash" {
+					c.Sandbox = sandboxOf(b.Input)
+					if b.ID != "" {
+						byID[b.ID] = len(out)
+					}
+				}
+				out = append(out, c)
+			}
+		case "user":
+			// The tool result echoes the sandbox setting that actually
+			// took effect, which wins over what the input asked for.
+			if len(l.ToolUseResult) == 0 || l.ToolUseResult[0] != '{' {
+				continue
+			}
+			for _, b := range blocks {
+				if i, ok := byID[b.ToolUseID]; ok && b.Type == "tool_result" {
+					if disable, ok := disableSandbox(l.ToolUseResult); ok {
+						out[i].Sandbox = sandboxFrom(disable)
+					}
+				}
 			}
 		}
 	}
 	return out, sc.Err()
+}
+
+// sandboxOf reports how a Bash input asked to run; a missing flag means
+// the default.
+func sandboxOf(input json.RawMessage) Sandbox {
+	disable, _ := disableSandbox(input)
+	return sandboxFrom(disable)
+}
+
+func sandboxFrom(disable bool) Sandbox {
+	if disable {
+		return SandboxBypassed
+	}
+	return SandboxDefault
+}
+
+// disableSandbox reads dangerouslyDisableSandbox (a bool, or occasionally
+// the string "true") and whether it was present at all.
+func disableSandbox(raw json.RawMessage) (disable, present bool) {
+	var in struct {
+		Disable any `json:"dangerouslyDisableSandbox"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil || in.Disable == nil {
+		return false, false
+	}
+	return in.Disable == true || in.Disable == "true", true
 }
 
 // toolDetail picks the most audit-relevant field from a tool input,
