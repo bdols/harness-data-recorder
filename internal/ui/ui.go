@@ -704,7 +704,10 @@ func (m Model) renameOne(ls live.Session) string {
 	if ls.TmuxPane == "" {
 		return "session isn't in a tmux window"
 	}
-	name := live.ProjectName(ls.CWD)
+	name := ls.Name
+	if name == "" {
+		name = live.ProjectName(ls.CWD)
+	}
 	if name == ls.TmuxLabel {
 		return fmt.Sprintf("%s is already named %q", ls.TmuxWindow, name)
 	}
@@ -1910,15 +1913,20 @@ func liveMarker(status string) (string, lipgloss.Style) {
 	}
 }
 
-// liveCell renders the one-column running indicator for a row, or a
-// blank when the session isn't running.
-func (m Model) liveCell(id string) string {
+// liveCell renders the tmux window id for a running session (e.g.
+// "tfclaude:8"), padded to w chars and coloured by status, or a blank
+// field of the same width when the session isn't running.
+func (m Model) liveCell(id string, w int) string {
 	ls, ok := m.live[id]
 	if !ok {
-		return " "
+		return strings.Repeat(" ", w)
 	}
-	glyph, style := liveMarker(ls.Status)
-	return style.Render(glyph)
+	label := ls.TmuxWindow
+	if label == "" {
+		label = "live"
+	}
+	_, style := liveMarker(ls.Status)
+	return style.Render(fmt.Sprintf("%-*s", w, truncate(label, w)))
 }
 
 func (m Model) viewList() string {
@@ -1942,6 +1950,14 @@ func (m Model) viewList() string {
 	// and CREATED (first message). Header words set the column widths.
 	modW, crtW, projW := 8, 7, 16
 	msgsW, modelW := 0, 0
+	// Live-window column: shows tmux window id for running sessions.
+	// Width is the max of all visible live sessions' window strings (min 4).
+	liveW := 4
+	for _, s := range m.filtered {
+		if ls, ok := m.live[s.ID]; ok && len(ls.TmuxWindow) > liveW {
+			liveW = len(ls.TmuxWindow)
+		}
+	}
 	// CC VER column: the running session's Claude Code version. Shown only
 	// when a visible session is actually running, so it costs no width
 	// otherwise. It's appended after the fixed columns below.
@@ -1955,10 +1971,10 @@ func (m Model) viewList() string {
 	var titleW int
 	if previewOn {
 		projW = 12
-		titleW = leftW - modW - crtW - projW - verGap - 8 // leading/trailing + 3 gaps
+		titleW = leftW - liveW - modW - crtW - projW - verGap - 8 // leading/trailing + 3 gaps
 	} else {
 		projW, msgsW, modelW = 20, 4, 8
-		titleW = leftW - modW - crtW - projW - msgsW - modelW - verGap - 12
+		titleW = leftW - liveW - modW - crtW - projW - msgsW - modelW - verGap - 12
 	}
 	if titleW < 10 {
 		titleW = 10
@@ -1977,8 +1993,9 @@ func (m Model) viewList() string {
 		end = len(m.filtered)
 	}
 
-	// Rows carry a leading one-column live indicator; the header gets a
-	// matching blank column so titles stay aligned.
+	// Rows carry a leading live-window column; the header gets a matching
+	// blank so titles stay aligned.
+	liveHeader := strings.Repeat(" ", liveW)
 	verSuffix := func(v string) string {
 		if verW == 0 {
 			return ""
@@ -1987,10 +2004,10 @@ func (m Model) viewList() string {
 	}
 	leftLines := make([]string, 0, rows+1)
 	if previewOn {
-		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s ",
+		leftLines = append(leftLines, liveHeader+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s ",
 			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE")+verSuffix("CC VER")))
 	} else {
-		leftLines = append(leftLines, " "+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s  %*s  %-*s ",
+		leftLines = append(leftLines, liveHeader+styleHeader.Render(fmt.Sprintf(" %*s  %*s  %-*s  %-*s  %*s  %-*s ",
 			modW, "MODIFIED", crtW, "CREATED", projW, "PROJECT", titleW, "TITLE", msgsW, "MSGS", modelW, "MODEL")+verSuffix("CC VER")))
 	}
 	for i := start; i < end; i++ {
@@ -2015,7 +2032,7 @@ func (m Model) viewList() string {
 		if i == m.cursor {
 			body = styleSelected.Render(body)
 		}
-		leftLines = append(leftLines, m.liveCell(s.ID)+body)
+		leftLines = append(leftLines, m.liveCell(s.ID, liveW)+body)
 	}
 	blank := strings.Repeat(" ", leftW)
 	for len(leftLines) < rows+1 {

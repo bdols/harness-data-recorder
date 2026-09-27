@@ -26,13 +26,14 @@ import (
 
 // Session describes one running Claude Code session.
 type Session struct {
-	PID       int
-	SessionID string
-	CWD       string
-	Status    string // "idle", "busy", "waiting", …
-	Name      string
-	Version   string // Claude Code version, e.g. "2.1.204"
-	UpdatedAt time.Time
+	PID        int
+	SessionID  string
+	CWD        string
+	Status     string // "idle", "busy", "waiting", …
+	Name       string
+	NameSource string // "user" = from --resume, "derived" = auto-generated
+	Version    string // Claude Code version, e.g. "2.1.204"
+	UpdatedAt  time.Time
 
 	// tmux location, empty when the session isn't running inside tmux.
 	TmuxPane   string // pane id, e.g. "%3" — the switch target
@@ -43,13 +44,14 @@ type Session struct {
 
 // registryEntry is the on-disk shape of ~/.claude/sessions/<pid>.json.
 type registryEntry struct {
-	PID       int    `json:"pid"`
-	SessionID string `json:"sessionId"`
-	CWD       string `json:"cwd"`
-	Status    string `json:"status"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	UpdatedAt int64  `json:"updatedAt"` // epoch millis
+	PID        int    `json:"pid"`
+	SessionID  string `json:"sessionId"`
+	CWD        string `json:"cwd"`
+	Status     string `json:"status"`
+	Name       string `json:"name"`
+	NameSource string `json:"nameSource"` // "user" = from --resume, "derived" = auto-generated
+	Version    string `json:"version"`
+	UpdatedAt  int64  `json:"updatedAt"` // epoch millis
 }
 
 // registryDir returns ~/.claude/sessions, overridable via
@@ -110,13 +112,14 @@ func scan(dir string, alive func(int) bool, panes map[int]pane) map[string]Sessi
 			continue // stale: process exited or pid reused
 		}
 		s := Session{
-			PID:       r.PID,
-			SessionID: r.SessionID,
-			CWD:       r.CWD,
-			Status:    r.Status,
-			Name:      r.Name,
-			Version:   r.Version,
-			UpdatedAt: time.UnixMilli(r.UpdatedAt),
+			PID:        r.PID,
+			SessionID:  r.SessionID,
+			CWD:        r.CWD,
+			Status:     r.Status,
+			Name:       r.Name,
+			NameSource: r.NameSource,
+			Version:    r.Version,
+			UpdatedAt:  time.UnixMilli(r.UpdatedAt),
 		}
 		if pane, ok := paneForPID(r.PID, panes); ok {
 			s.TmuxPane = pane.id
@@ -261,7 +264,16 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 		}
 		ordered = append(ordered, s)
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].UpdatedAt.After(ordered[j].UpdatedAt) })
+	// User-named sessions (--resume) take priority; within the same source,
+	// the most recently active session names the window.
+	sort.Slice(ordered, func(i, j int) bool {
+		ui := ordered[i].NameSource == "user"
+		uj := ordered[j].NameSource == "user"
+		if ui != uj {
+			return ui
+		}
+		return ordered[i].UpdatedAt.After(ordered[j].UpdatedAt)
+	})
 
 	var order []string
 	for _, s := range ordered {
@@ -272,7 +284,10 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 			order = append(order, s.TmuxWindow)
 		}
 		g.ids = append(g.ids, s.SessionID)
-		n := ProjectName(s.CWD)
+		n := s.Name
+		if n == "" {
+			n = ProjectName(s.CWD)
+		}
 		if n != "" && !g.seen[n] {
 			g.seen[n] = true
 			g.names = append(g.names, n)
