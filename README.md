@@ -98,6 +98,8 @@ csb --commands sub: opus       # calls made by Opus subagents
 csb --commands rm > audit.txt  # greppable / redirectable
 ```
 
+Terms are ANDed. `sandbox:`, `sub:` and `model:` are **selectors**, tested against that field alone; every other term is a free-text substring over tool, detail, project and model. That distinction matters: as plain substrings, a selector also matched any command whose *text* mentioned it — so the audit polluted its own results (running `csb --commands sandbox:bypass` added a row that then matched the same query), inflating exactly the number a compliance review needs to be exact. An unrecognised selector value (`sandbox:typo`) matches nothing rather than everything, so a mistyped filter fails visibly instead of looking like a clean bill of health.
+
 **MODEL** is the model that issued the call (`sub:` marks calls from an Agent-tool subagent, read from the session's `subagents/` transcripts — live sessions only, since backups don't store them). **SANDBOX** is `BYPASS` when a Bash command ran with `dangerouslyDisableSandbox` (the value the tool result echoes back, so it reflects what actually took effect) and `default` otherwise. Transcripts don't record whether sandboxing was enabled, so `default` means sandboxed only in projects with `sandbox.enabled` set.
 
 This is a durable, atuin-style history of Claude's actions that survives Claude Code's 30-day transcript cleanup (because the backups do).

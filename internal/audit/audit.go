@@ -52,20 +52,69 @@ func (e Entry) SandboxLabel() string {
 	return ""
 }
 
-// Matches reports whether every (lowercased) term appears in the entry's
-// tool, detail, project, or model. Bash calls also match
-// "sandbox:default" or "sandbox:bypass", and subagent calls match "sub:".
+// Matches reports whether the entry satisfies every term (terms are
+// ANDed). A term carrying a known selector prefix — "sandbox:", "sub:",
+// "model:" — is tested against that field alone; any other term is a
+// free-text substring over the tool, detail, project and model.
+//
+// The selectors have to be structured rather than folded into the
+// free-text haystack. As a substring, "sandbox:bypass" also matches any
+// command whose *text* mentions it — including csb's own audit commands,
+// so the audit pollutes its own results as it grows — which silently
+// inflates precisely the query a compliance review depends on being
+// exact.
 func (e Entry) Matches(terms []string) bool {
-	hay := strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project + " " + e.ModelShort())
-	if l := e.SandboxLabel(); l != "" {
-		hay += " sandbox:" + strings.ToLower(l)
-	}
 	for _, t := range terms {
-		if !strings.Contains(hay, strings.ToLower(t)) {
-			return false
+		t = strings.ToLower(strings.TrimSpace(t))
+		switch {
+		case t == "":
+			continue
+		case strings.HasPrefix(t, "sandbox:"):
+			if !e.matchesSandbox(strings.TrimPrefix(t, "sandbox:")) {
+				return false
+			}
+		case strings.HasPrefix(t, "sub:"):
+			// "sub:" alone means any subagent call; "sub:opus" narrows it
+			// to the issuing model.
+			m := strings.TrimPrefix(t, "sub:")
+			if !e.Subagent || !strings.Contains(strings.ToLower(e.Model), m) {
+				return false
+			}
+		case strings.HasPrefix(t, "model:"):
+			if !strings.Contains(strings.ToLower(e.ModelShort()), strings.TrimPrefix(t, "model:")) {
+				return false
+			}
+		default:
+			if !strings.Contains(e.haystack(), t) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// haystack is the free-text search target: everything a bare term may
+// match. Sandbox state is deliberately absent — it is reachable only
+// through the sandbox: selector, so command text can never impersonate
+// it.
+func (e Entry) haystack() string {
+	return strings.ToLower(e.Tool + " " + e.Detail + " " + e.Project + " " + e.ModelShort())
+}
+
+// matchesSandbox tests a sandbox: selector value. An unrecognised value
+// matches nothing rather than falling back to free text: for an audit, a
+// mistyped filter returning zero rows is a visible failure, while one
+// returning every row quietly looks like a clean bill of health.
+func (e Entry) matchesSandbox(v string) bool {
+	switch v {
+	case "": // any Bash call, whatever its sandbox state
+		return e.Sandbox != session.SandboxNA
+	case "bypass", "bypassed":
+		return e.Sandbox == session.SandboxBypassed
+	case "default":
+		return e.Sandbox == session.SandboxDefault
+	}
+	return false
 }
 
 // Collect gathers tool calls from every live session under root plus any

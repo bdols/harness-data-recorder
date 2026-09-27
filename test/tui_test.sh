@@ -246,6 +246,24 @@ if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands audit-mark
 else
 	bad "--commands filter found nothing"
 fi
+# Selectors must be structured, not substrings: an unknown value matches
+# nothing, and the sandbox state is not reachable through command text.
+if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:default 2>/dev/null | grep -c audit-marker-xyz)" = "1" ]; then
+	ok "--commands sandbox:default selects the Bash call"
+else
+	bad "sandbox:default did not select the Bash call"
+fi
+if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:bypass 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
+	ok "--commands sandbox:bypass excludes non-bypassed calls"
+else
+	bad "sandbox:bypass matched a call that did not bypass"
+fi
+if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:typo 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
+	ok "an unrecognised selector value matches nothing"
+else
+	bad "a mistyped selector returned rows"
+fi
+
 # TUI: c opens the audit view showing the call.
 launch
 send c

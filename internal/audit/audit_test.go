@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bdols/claude-session-browser/internal/backup"
+	"github.com/bdols/claude-session-browser/internal/session"
 )
 
 // writeSess writes a minimal session with one Bash tool call.
@@ -77,5 +78,102 @@ func TestCollectIncludesReapedFromBackup(t *testing.T) {
 	}
 	if !live || !reaped {
 		t.Errorf("live=%v reaped=%v, want both (reaped must come from backups)", live, reaped)
+	}
+}
+
+func bashEntry(detail string, sb session.Sandbox) Entry {
+	return Entry{Tool: "Bash", Detail: detail, Project: "csb", Model: "claude-opus-5", Sandbox: sb}
+}
+
+// The regression this guards: a command whose text mentions the selector
+// used to match it, so running the audit polluted the audit.
+func TestMatchesSandboxSelectorIgnoresCommandText(t *testing.T) {
+	decoy := bashEntry("csb --commands sandbox:bypass | wc -l", session.SandboxDefault)
+	if decoy.Matches([]string{"sandbox:bypass"}) {
+		t.Error("a command merely mentioning sandbox:bypass must not match the selector")
+	}
+	real := bashEntry("curl https://example.com", session.SandboxBypassed)
+	if !real.Matches([]string{"sandbox:bypass"}) {
+		t.Error("an actually-bypassed call must match")
+	}
+	// The text is still findable as free text.
+	if !decoy.Matches([]string{"--commands"}) {
+		t.Error("free-text search over the command must still work")
+	}
+}
+
+func TestMatchesSandboxValues(t *testing.T) {
+	byp := bashEntry("a", session.SandboxBypassed)
+	def := bashEntry("b", session.SandboxDefault)
+	read := Entry{Tool: "Read", Detail: "/x", Sandbox: session.SandboxNA}
+
+	cases := []struct {
+		term string
+		e    Entry
+		want bool
+	}{
+		{"sandbox:bypass", byp, true},
+		{"sandbox:bypassed", byp, true},
+		{"sandbox:default", byp, false},
+		{"sandbox:default", def, true},
+		{"sandbox:bypass", def, false},
+		{"sandbox:", byp, true},   // any Bash call
+		{"sandbox:", read, false}, // not a Bash call
+		{"sandbox:default", read, false},
+		{"sandbox:nonsense", byp, false}, // typo matches nothing, not everything
+		{"SANDBOX:BYPASS", byp, true},    // case-insensitive
+	}
+	for _, c := range cases {
+		if got := c.e.Matches([]string{c.term}); got != c.want {
+			t.Errorf("%q against %v = %v, want %v", c.term, c.e.SandboxLabel(), got, c.want)
+		}
+	}
+}
+
+func TestMatchesSubagentSelector(t *testing.T) {
+	sub := Entry{Tool: "Bash", Detail: "ls", Model: "claude-sonnet-5", Subagent: true}
+	main := Entry{Tool: "Bash", Detail: "talking about sub: agents", Model: "claude-opus-5"}
+
+	if !sub.Matches([]string{"sub:"}) {
+		t.Error("subagent call should match sub:")
+	}
+	if main.Matches([]string{"sub:"}) {
+		t.Error("a main-loop call whose text says 'sub:' must not match the selector")
+	}
+	if !sub.Matches([]string{"sub:sonnet"}) {
+		t.Error("sub:sonnet should match a sonnet subagent")
+	}
+	if sub.Matches([]string{"sub:opus"}) {
+		t.Error("sub:opus must not match a sonnet subagent")
+	}
+}
+
+// model: scopes a model term to the model field, so it can't be faked by
+// a command that happens to name a model.
+func TestMatchesModelSelector(t *testing.T) {
+	e := Entry{Tool: "Bash", Detail: "echo claude-sonnet-5", Model: "claude-opus-5"}
+	if !e.Matches([]string{"model:opus"}) {
+		t.Error("model:opus should match the issuing model")
+	}
+	if e.Matches([]string{"model:sonnet"}) {
+		t.Error("model:sonnet must not match a model named only in the command text")
+	}
+	// Bare terms stay free-text, so the old behaviour is intact.
+	if !e.Matches([]string{"sonnet"}) {
+		t.Error("a bare term should still search the command text")
+	}
+}
+
+// Terms are ANDed, and an empty term list matches everything.
+func TestMatchesCombinesTerms(t *testing.T) {
+	e := bashEntry("curl https://example.com", session.SandboxBypassed)
+	if !e.Matches(nil) {
+		t.Error("no terms should match everything")
+	}
+	if !e.Matches([]string{"sandbox:bypass", "curl"}) {
+		t.Error("selector AND free text should match")
+	}
+	if e.Matches([]string{"sandbox:bypass", "wget"}) {
+		t.Error("a failing free-text term must reject the entry")
 	}
 }
