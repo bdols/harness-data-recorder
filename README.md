@@ -119,6 +119,7 @@ Windows are the unit, not sessions — several Claude processes often share one 
 Two rules keep this useful rather than merely tidy:
 
 - **Names you chose yourself are left alone.** tmux records a manual rename as `automatic-rename off`, which is a reliable signal of intent — replacing a deliberate `jetson` with a generic project name is a downgrade. `--force` (or `t` on a single session, which is an explicit request) overrides it.
+- **…but csb's own renames stay updatable.** `rename-window` *also* sets `automatic-rename off`, so a window csb named is indistinguishable from one you named — which would freeze it permanently. csb therefore records the name it assigned in a `@csb_named` tmux window option: if the window still carries that name, csb may rename it again; if the name has since changed, you've taken the window over and the guard applies again. `u` clears the marker along with the flag. Windows renamed by a csb build older than this carry no marker, so one `--force` run is needed to adopt them.
 - **Ambiguous names get qualified.** Nine windows all named `obsidian` are no more informative than the `claude` they replaced, so when a project name would collide csb appends a short slug of the session's title: `obsidian-check-ebook`, `obsidian-evaluate-gemma`.
 
 Renaming turns tmux's `automatic-rename` off for that window, which is what makes the name stick instead of reverting to the running command; `u` / `set-window-option automatic-rename on` reverses it. Re-running is a no-op when everything is already named correctly.

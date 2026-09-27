@@ -459,6 +459,38 @@ if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "pro
 else
 	bad "--force did not rename the hand-named window"
 fi
+
+# csb must not mistake its own past renames for the user's. rename-window
+# turns automatic-rename off, so without the @csb_named marker every
+# window csb ever named would be permanently frozen.
+MARK=$("$TMUX_BIN" -L "$NS" list-panes -a -F '#{@csb_named}' | head -1)
+if [ "$MARK" = "proj-widgets" ]; then
+	ok "rename records the @csb_named marker"
+else
+	bad "marker is '$MARK', want 'proj-widgets'"
+fi
+# Give the session a name; csb should update the window it named before,
+# with no --force, even though automatic-rename is off.
+printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","name":"widgets","nameSource":"user","version":"9.9.9","updatedAt":2}\n' \
+	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
+CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows >/dev/null 2>&1
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "widgets" ]; then
+	ok "csb updates a window it named itself, without --force"
+else
+	bad "csb refused to update its own window (got '$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)')"
+fi
+# But once the user renames it, csb must yield again.
+"$TMUX_BIN" -L "$NS" rename-window -t w:0 "user-owns-this"
+printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","name":"changed-again","nameSource":"user","version":"9.9.9","updatedAt":3}\n' \
+	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
+CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$CSB" --name-windows >/dev/null 2>&1
+if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "user-owns-this" ]; then
+	ok "csb yields after the user renames its window"
+else
+	bad "csb clobbered a window the user renamed after it"
+fi
 "$TMUX_BIN" -L "$NS" kill-server 2>/dev/null
 rm -rf "$NHOME" "$WORK/nsessions"
 

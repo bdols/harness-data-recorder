@@ -40,6 +40,7 @@ type Session struct {
 	TmuxWindow string // "session:window", e.g. "0:5" — for display
 	TmuxLabel  string // tmux window name — for display
 	TmuxNamed  bool   // window name was set by hand, not by tmux
+	TmuxMarker string // name csb last assigned to this window (@csb_named)
 }
 
 // registryEntry is the on-disk shape of ~/.claude/sessions/<pid>.json.
@@ -126,6 +127,7 @@ func scan(dir string, alive func(int) bool, panes map[int]pane) map[string]Sessi
 			s.TmuxWindow = pane.window
 			s.TmuxLabel = pane.label
 			s.TmuxNamed = pane.named
+			s.TmuxMarker = pane.marker
 		}
 		// Keep the most recently updated entry if a pid was reused
 		// across two registry files for the same session id.
@@ -141,7 +143,8 @@ type pane struct {
 	pid    int
 	window string
 	label  string
-	named  bool // window was renamed by hand (automatic-rename off)
+	named  bool   // window was renamed by hand (automatic-rename off)
+	marker string // @csb_named: the name csb last gave this window
 }
 
 // tmuxPanes lists every tmux pane keyed by its pane pid (the shell), or
@@ -149,7 +152,7 @@ type pane struct {
 func tmuxPanes() map[int]pane {
 	panes := map[int]pane{}
 	out, err := tmuxCmd("list-panes", "-a", "-F",
-		"#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}\t#{window_name}\t#{?automatic-rename,on,off}").Output()
+		"#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}\t#{window_name}\t#{?automatic-rename,on,off}\t#{@csb_named}").Output()
 	if err != nil {
 		return panes
 	}
@@ -162,9 +165,14 @@ func tmuxPanes() map[int]pane {
 		if err != nil {
 			continue
 		}
-		// automatic-rename off means someone named this window by hand.
+		// automatic-rename off means someone named this window by hand —
+		// though that "someone" may have been csb, which marker records.
 		named := len(f) > 4 && f[4] == "off"
-		panes[pid] = pane{id: f[0], pid: pid, window: f[2], label: f[3], named: named}
+		marker := ""
+		if len(f) > 5 {
+			marker = f[5]
+		}
+		panes[pid] = pane{id: f[0], pid: pid, window: f[2], label: f[3], named: named, marker: marker}
 	}
 	return panes
 }
@@ -237,7 +245,9 @@ type Rename struct {
 //   - Windows you named yourself are left alone unless force is set. tmux
 //     records that as automatic-rename off, which is a reliable signal of
 //     intent — clobbering a hand-picked "jetson" with a generic project
-//     name is a downgrade, not an improvement.
+//     name is a downgrade, not an improvement. Windows csb named itself
+//     are exempt from that guard (see csbOwns), or its own past renames
+//     would lock it out of ever improving them.
 //   - Names that would collide are disambiguated using labels (session id
 //     to a short title), because several sessions in one project produce
 //     several identical window names, which is no more informative than
@@ -259,8 +269,8 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 		if s.TmuxWindow == "" || s.TmuxPane == "" {
 			continue
 		}
-		if s.TmuxNamed && !force {
-			continue // deliberately named by hand
+		if s.TmuxNamed && !force && !csbOwns(s) {
+			continue // deliberately named by hand, and not by us
 		}
 		ordered = append(ordered, s)
 	}
@@ -334,6 +344,19 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 	return out
 }
 
+// csbOwns reports whether this window's current name is one csb gave it
+// and nobody has changed since.
+//
+// rename-window turns automatic-rename off, so a window csb renamed looks
+// exactly like one the user named by hand. The @csb_named marker breaks
+// that tie: it holds the name csb last assigned, so if the window still
+// carries that name, csb may update it. If the name has since diverged
+// the user has taken the window over, and the hand-named guard applies
+// again.
+func csbOwns(s Session) bool {
+	return s.TmuxMarker != "" && s.TmuxMarker == s.TmuxLabel
+}
+
 // qualifier picks a short distinguishing suffix for a window from the
 // titles of the sessions in it.
 func qualifier(ids []string, labels map[string]string) string {
@@ -398,7 +421,15 @@ func RenameWindow(pane, name string) error {
 	if pane == "" {
 		return fmt.Errorf("no tmux pane for this session")
 	}
-	return tmuxCmd("rename-window", "-t", pane, name).Run()
+	if err := tmuxCmd("rename-window", "-t", pane, name).Run(); err != nil {
+		return err
+	}
+	// Record what we named it. rename-window turns automatic-rename off,
+	// which is indistinguishable from the user naming the window by hand;
+	// without this marker csb would mistake its own past work for the
+	// user's and refuse to ever update the window again.
+	_ = tmuxCmd("set-option", "-w", "-t", pane, "@csb_named", name).Run()
+	return nil
 }
 
 // RestoreAutoRename hands a window back to tmux's automatic naming,
@@ -407,6 +438,7 @@ func RestoreAutoRename(pane string) error {
 	if pane == "" {
 		return fmt.Errorf("no tmux pane for this session")
 	}
+	_ = tmuxCmd("set-option", "-w", "-t", pane, "-u", "@csb_named").Run()
 	return tmuxCmd("set-window-option", "-t", pane, "automatic-rename", "on").Run()
 }
 

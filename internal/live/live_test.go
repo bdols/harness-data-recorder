@@ -382,3 +382,142 @@ func TestScanReadsNameSource(t *testing.T) {
 		t.Errorf("name=%q nameSource=%q, want mine/user", s.Name, s.NameSource)
 	}
 }
+
+// csb's own past renames must not lock it out. rename-window turns
+// automatic-rename off, so a window csb named looks hand-named; the
+// @csb_named marker is what distinguishes the two.
+func TestPlanRenamesUpdatesItsOwnPreviousName(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", Name: "ebooks", NameSource: "user", CWD: "/home/x/obsidian",
+			TmuxPane: "%1", TmuxWindow: "0:1",
+			TmuxLabel: "obsidian-check-ebook", TmuxNamed: true, TmuxMarker: "obsidian-check-ebook"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 || plan[0].New != "ebooks" {
+		t.Fatalf("plan = %+v, want csb to update the window it named itself", plan)
+	}
+}
+
+// If the user renamed the window after csb did, the marker no longer
+// matches and the hand-named guard applies again.
+func TestPlanRenamesYieldsAfterUserRenames(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", Name: "ebooks", NameSource: "user", CWD: "/home/x/obsidian",
+			TmuxPane: "%1", TmuxWindow: "0:1",
+			TmuxLabel: "my-own-label", TmuxNamed: true, TmuxMarker: "obsidian-check-ebook"},
+	}
+	if plan := PlanRenames(sessions, nil, false); len(plan) != 0 {
+		t.Errorf("plan = %+v, want empty: the user renamed it after csb did", plan)
+	}
+	if plan := PlanRenames(sessions, nil, true); len(plan) != 1 {
+		t.Errorf("force plan = %+v, want one rename", plan)
+	}
+}
+
+// A marker left over from a rename that no longer matches anything must
+// not resurrect the guard exemption.
+func TestCsbOwns(t *testing.T) {
+	cases := []struct {
+		name          string
+		label, marker string
+		want          bool
+	}{
+		{"csb named it and it still holds", "csb", "csb", true},
+		{"user renamed after csb", "mine", "csb", false},
+		{"never marked", "jetson", "", false},
+		{"empty label and marker", "", "", false},
+	}
+	for _, c := range cases {
+		got := csbOwns(Session{TmuxLabel: c.label, TmuxMarker: c.marker})
+		if got != c.want {
+			t.Errorf("%s: csbOwns(label=%q marker=%q) = %v, want %v", c.name, c.label, c.marker, got, c.want)
+		}
+	}
+}
+
+// scan must carry the marker through from tmux, or every csb-named
+// window silently reverts to looking hand-named.
+func TestScanReadsCsbMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistry(t, dir, "100.json",
+		`{"pid":100,"sessionId":"s","cwd":"/p","status":"idle","updatedAt":1}`)
+	panes := map[int]pane{
+		100: {id: "%1", pid: 100, window: "0:1", label: "csb", named: true, marker: "csb"},
+	}
+	got := scan(dir, func(int) bool { return true }, panes)
+	if s := got["s"]; s.TmuxMarker != "csb" || !s.TmuxNamed {
+		t.Errorf("marker=%q named=%v, want csb/true", s.TmuxMarker, s.TmuxNamed)
+	}
+}
+
+// RenameWindow and RestoreAutoRename against a real tmux server, on a
+// private socket so the developer's own session is never touched. The
+// marker round-trip is the part unit tests with injected panes can't
+// prove: it has to survive tmux's own storage and format expansion.
+func TestRenameWindowMarkerRoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	sock := "csb-test-" + strings.ReplaceAll(t.Name(), "/", "-")
+	tm := func(args ...string) *exec.Cmd {
+		return exec.Command("tmux", append([]string{"-L", sock}, args...)...)
+	}
+	if err := tm("-f", "/dev/null", "new-session", "-d", "-s", "t", "-x", "80", "-y", "24").Run(); err != nil {
+		t.Skipf("cannot start private tmux server: %v", err)
+	}
+	t.Cleanup(func() { _ = tm("kill-server").Run() })
+	out, err := tm("list-panes", "-t", "t:0", "-F", "#{pane_id}").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := strings.TrimSpace(string(out))
+	t.Setenv("CSB_TMUX_SOCKET", sock)
+
+	field := func(f string) string {
+		b, err := tm("list-panes", "-t", "t:0", "-F", f).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+
+	if err := RenameWindow(target, "proj-one"); err != nil {
+		t.Fatalf("RenameWindow: %v", err)
+	}
+	if got := field("#{window_name}"); got != "proj-one" {
+		t.Errorf("window name = %q, want proj-one", got)
+	}
+	if got := field("#{@csb_named}"); got != "proj-one" {
+		t.Errorf("marker = %q, want proj-one", got)
+	}
+	// automatic-rename off is what makes the name stick.
+	if got := field("#{?automatic-rename,on,off}"); got != "off" {
+		t.Errorf("automatic-rename = %q, want off", got)
+	}
+	// tmuxPanes must surface the marker, since that is what PlanRenames reads.
+	panes := tmuxPanes()
+	var found bool
+	for _, p := range panes {
+		if p.id == target {
+			found = true
+			if p.marker != "proj-one" || !p.named {
+				t.Errorf("pane = %+v, want marker proj-one and named", p)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("tmuxPanes did not list pane %s", target)
+	}
+
+	// Undo must clear both the flag and the marker, or the window would
+	// stay exempt from the hand-named guard forever.
+	if err := RestoreAutoRename(target); err != nil {
+		t.Fatalf("RestoreAutoRename: %v", err)
+	}
+	if got := field("#{?automatic-rename,on,off}"); got != "on" {
+		t.Errorf("automatic-rename = %q after restore, want on", got)
+	}
+	if got := field("#{@csb_named}"); got != "" {
+		t.Errorf("marker = %q after restore, want empty", got)
+	}
+}
