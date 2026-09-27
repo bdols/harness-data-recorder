@@ -462,6 +462,50 @@ fi
 "$TMUX_BIN" -L "$NS" kill-server 2>/dev/null
 rm -rf "$NHOME" "$WORK/nsessions"
 
+echo "session-name window naming (--resume name)"
+# A session named with --resume must name its window after that name, not
+# the cwd basename — this is what separates several windows in one project.
+NS2="csbname2$$"
+mkdir -p "$WORK/n2sessions" "$WORK/proj-shared"
+cp "$(command -v sleep)" "$WORK/claude-win2"
+"$TMUX_BIN" -L "$NS2" kill-server 2>/dev/null
+"$TMUX_BIN" -L "$NS2" new-session -d -s w -x 80 -y 24 "$WORK/claude-win2 120"
+sleep 0.5
+N2PID=$("$TMUX_BIN" -L "$NS2" list-panes -a -F '#{pane_pid}' | head -1)
+printf '{"pid":%d,"sessionId":"named1","cwd":"%s","status":"idle","name":"ebooks","nameSource":"user","version":"9.9.9","updatedAt":1}\n' \
+	"$N2PID" "$WORK/proj-shared" >"$WORK/n2sessions/$N2PID.json"
+CSB_TMUX_SOCKET="$NS2" CSB_SESSIONS_DIR="$WORK/n2sessions" HOME="$NHOME" \
+	"$CSB" --name-windows >/dev/null 2>&1
+W2=$("$TMUX_BIN" -L "$NS2" list-windows -F '#{window_name}' | head -1)
+if [ "$W2" = "ebooks" ]; then
+	ok "window named after the session name, not the cwd"
+else
+	bad "window named '$W2', want 'ebooks' (cwd basename is proj-shared)"
+fi
+
+echo "live window-id column in the list"
+# The list's live column shows the tmux window id for a running session.
+LHOME="$WORK/lhome"
+mkdir -p "$LHOME/.claude/projects/-proj"
+printf '{"sessionId":"named1","type":"ai-title","aiTitle":"Named Session","cwd":"%s"}\n' "$WORK/proj-shared" \
+	>"$LHOME/.claude/projects/-proj/named1.jsonl"
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"HOME=$LHOME CSB_TMUX_SOCKET=$NS2 CSB_SESSIONS_DIR=$WORK/n2sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
+wait_for "Named Session" 8 || echo "  (warning: list never appeared)"
+assert_present "list shows the tmux window id for a live session" "w:0"
+send q
+# Negative control: with no live sessions the column must be blank, so the
+# assertion above can't pass on some incidental "w:0" elsewhere on screen.
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"HOME=$LHOME CSB_TMUX_SOCKET=$NS2 CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
+wait_for "Named Session" 8 || echo "  (warning: list never appeared)"
+assert_absent "no window id when nothing is live" "w:0"
+send q
+"$TMUX_BIN" -L "$NS2" kill-server 2>/dev/null
+rm -rf "$LHOME" "$WORK/n2sessions"
+
 echo "resume hand-off (enter)"
 launch # alpha selected at top
 send Enter

@@ -309,3 +309,76 @@ func TestSlug(t *testing.T) {
 		}
 	}
 }
+
+// A session named with --resume should name its window, since the user's
+// own label beats a directory basename.
+func TestPlanRenamesPrefersSessionName(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", Name: "csb", NameSource: "user", CWD: "/home/x/code/claude-session-browser",
+			TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 || plan[0].New != "csb" {
+		t.Fatalf("plan = %+v, want one rename to \"csb\"", plan)
+	}
+}
+
+// Several sessions in one project used to collide on the same basename;
+// their distinct session names now separate them without any qualifier.
+func TestPlanRenamesSessionNamesAvoidCollisions(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", Name: "ebooks", NameSource: "user", CWD: "/home/x/obsidian",
+			TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+		"b": {SessionID: "b", Name: "pi5", NameSource: "user", CWD: "/home/x/obsidian",
+			TmuxPane: "%2", TmuxWindow: "0:2", TmuxLabel: "claude"},
+	}
+	got := map[string]string{}
+	for _, r := range PlanRenames(sessions, nil, false) {
+		got[r.Window] = r.New
+	}
+	if got["0:1"] != "ebooks" || got["0:2"] != "pi5" {
+		t.Errorf("names = %v, want 0:1=ebooks 0:2=pi5 (no qualifier suffix)", got)
+	}
+}
+
+// In a shared window a user-chosen name wins over an auto-derived one
+// even when the derived session is more recently active.
+func TestPlanRenamesUserNameBeatsDerived(t *testing.T) {
+	newer := time.Now()
+	sessions := map[string]Session{
+		"a": {SessionID: "a", Name: "derived-one", NameSource: "derived", CWD: "/p/x",
+			TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude", UpdatedAt: newer},
+		"b": {SessionID: "b", Name: "mine", NameSource: "user", CWD: "/p/x",
+			TmuxPane: "%1", TmuxWindow: "0:4", TmuxLabel: "claude", UpdatedAt: newer.Add(-time.Hour)},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 {
+		t.Fatalf("got %d renames, want 1: %+v", len(plan), plan)
+	}
+	if plan[0].New != "mine+derived-one" {
+		t.Errorf("name = %q, want mine+derived-one (user name first)", plan[0].New)
+	}
+}
+
+// An unnamed session still falls back to the project basename.
+func TestPlanRenamesFallsBackToProjectName(t *testing.T) {
+	sessions := map[string]Session{
+		"a": {SessionID: "a", CWD: "/home/x/code/netlogo", TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
+	}
+	plan := PlanRenames(sessions, nil, false)
+	if len(plan) != 1 || plan[0].New != "netlogo" {
+		t.Fatalf("plan = %+v, want one rename to \"netlogo\"", plan)
+	}
+}
+
+// scan must carry nameSource through from the registry, or the user/
+// derived priority silently degrades to "everything is derived".
+func TestScanReadsNameSource(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistry(t, dir, "100.json",
+		`{"pid":100,"sessionId":"s","cwd":"/p","status":"idle","name":"mine","nameSource":"user","updatedAt":1}`)
+	got := scan(dir, func(int) bool { return true }, map[int]pane{})
+	if s := got["s"]; s.Name != "mine" || s.NameSource != "user" {
+		t.Errorf("name=%q nameSource=%q, want mine/user", s.Name, s.NameSource)
+	}
+}
