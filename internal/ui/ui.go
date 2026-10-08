@@ -1942,6 +1942,71 @@ func (m Model) liveCell(id string, w int) string {
 	return style.Render(fmt.Sprintf("%-*s", w, truncate(label, w)))
 }
 
+// tokenRamp is a half-decade ladder of block heights: each step is ~3x
+// the tokens of the one below, so four orders of magnitude fit in one
+// cell. Billed volume spans 75K to 350M across real sessions, which no
+// linear bar could show.
+var tokenRamp = []struct {
+	upTo  int
+	glyph string
+}{
+	{100_000, "▁"},
+	{300_000, "▂"},
+	{1_000_000, "▃"},
+	{3_000_000, "▄"},
+	{10_000_000, "▅"},
+	{30_000_000, "▆"},
+	{100_000_000, "▇"},
+}
+
+// tokenCell renders one session's token usage as a single bar.
+//
+// Two independent things are worth seeing and they get separate channels:
+// height is how much was billed, colour is how much of it missed cache
+// (input + cache writes, the part charged at full rate or more, versus
+// cache reads at a fraction). They have to be separate because the miss
+// *ratio* falls as a session grows — a long session amortises each
+// re-cache over thousands of cheap reads, while a tiny one never does —
+// so a single blended figure would mostly restate size, inverted.
+func tokenCell(s session.Session) string {
+	billed := s.Tokens.Billed()
+	if billed == 0 {
+		return "  "
+	}
+	var style lipgloss.Style
+	switch share := uncachedShare(s.Tokens); {
+	case share >= 15:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // red: mostly uncached
+	case share >= 5:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber
+	default:
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("42")) // green: well cached
+	}
+	return style.Render(tokenGlyph(billed)) + " "
+}
+
+// tokenGlyph picks the bar height for a billed-token count.
+func tokenGlyph(billed int) string {
+	for _, step := range tokenRamp {
+		if billed < step.upTo {
+			return step.glyph
+		}
+	}
+	return "█"
+}
+
+// uncachedShare is the percentage of billed tokens charged at full rate
+// or above — fresh input plus cache writes — as opposed to cache reads,
+// which are charged at a fraction. It is the "how much of this was
+// wasted re-sending context" number.
+func uncachedShare(t session.Tokens) int {
+	billed := t.Billed()
+	if billed == 0 {
+		return 0
+	}
+	return 100 * (t.Input + t.CacheWrite) / billed
+}
+
 func (m Model) viewList() string {
 	// Wide terminals split into a session list (left) and a live
 	// transcript preview of the selection (right).
@@ -1981,13 +2046,16 @@ func (m Model) viewList() string {
 			break
 		}
 	}
+	// Token bar: one cell whose height is the session's billed volume and
+	// whose colour is the share that missed cache. Costs 2 columns.
+	const tokW = 2
 	var titleW int
 	if previewOn {
 		projW = 12
-		titleW = leftW - liveW - modW - crtW - projW - verGap - 8 // leading/trailing + 3 gaps
+		titleW = leftW - liveW - tokW - modW - crtW - projW - verGap - 8 // leading/trailing + 3 gaps
 	} else {
 		projW, msgsW, modelW = 20, 4, 8
-		titleW = leftW - liveW - modW - crtW - projW - msgsW - modelW - verGap - 12
+		titleW = leftW - liveW - tokW - modW - crtW - projW - msgsW - modelW - verGap - 12
 	}
 	if titleW < 10 {
 		titleW = 10
@@ -2008,7 +2076,7 @@ func (m Model) viewList() string {
 
 	// Rows carry a leading live-window column; the header gets a matching
 	// blank so titles stay aligned.
-	liveHeader := strings.Repeat(" ", liveW)
+	liveHeader := strings.Repeat(" ", liveW+tokW)
 	verSuffix := func(v string) string {
 		if verW == 0 {
 			return ""
@@ -2045,7 +2113,7 @@ func (m Model) viewList() string {
 		if i == m.cursor {
 			body = styleSelected.Render(body)
 		}
-		leftLines = append(leftLines, m.liveCell(s.ID, liveW)+body)
+		leftLines = append(leftLines, m.liveCell(s.ID, liveW)+tokenCell(s)+body)
 	}
 	blank := strings.Repeat(" ", leftW)
 	for len(leftLines) < rows+1 {
@@ -2126,7 +2194,7 @@ func (m Model) statusAndHelp() (status, help string) {
 	case m.filter.Value() != "":
 		status = styleStatus.Render(truncate(fmt.Sprintf(" filter:%q · %d sessions · esc clear", m.filter.Value(), len(m.filtered)), m.width-1))
 	default:
-		status = styleStatus.Render(fmt.Sprintf(" %d sessions", len(m.filtered))) + m.liveLegend()
+		status = styleStatus.Render(fmt.Sprintf(" %d sessions", len(m.filtered))) + m.liveLegend() + m.tokenLegend()
 		if n := m.reapedCount(); n > 0 {
 			status += styleError.Render(fmt.Sprintf(" · ⚠ %d running with no saved transcript — press R to rescue", n))
 		}
@@ -2136,6 +2204,21 @@ func (m Model) statusAndHelp() (status, help string) {
 	}
 	help = styleStatus.Render(" " + truncate(keyBar, m.width-2))
 	return status, help
+}
+
+// tokenLegend explains the token bar: the ramp for volume, then the
+// colours for how much of it missed cache. Shown only when some visible
+// session actually has usage recorded, so it costs nothing otherwise.
+func (m Model) tokenLegend() string {
+	for _, s := range m.filtered {
+		if s.Tokens.Billed() > 0 {
+			g := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("▇")
+			a := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("▇")
+			r := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("▇")
+			return styleStatus.Render(" · tokens ▁▃▅▇█ · ") + g + a + r + styleStatus.Render(" uncached")
+		}
+	}
+	return ""
 }
 
 // liveLegend renders the per-status breakdown of running sessions,

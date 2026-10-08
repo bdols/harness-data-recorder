@@ -142,6 +142,14 @@ The columns stay **split rather than totalled**, because the split is the whole 
 
 The inspect card (`i`) shows the same breakdown for one session, including what share of its billed tokens were cache reads.
 
+### The token bar in the list
+
+Each row carries a one-cell bar whose **height is how much was billed** (`▁▂▃▄▅▆▇█`, half-decade steps from 100K to 100M+, because real sessions span four orders of magnitude) and whose **colour is how much of that missed cache** — green under 5%, amber to 15%, red above. "Uncached" means fresh input plus cache writes: the tokens charged at full rate or more, as opposed to cache reads charged at a fraction.
+
+The two axes are deliberately separate, because they answer different questions and move in opposite directions. Measured over 27 real sessions here, the cache-miss *ratio* barely tracks how long a session ran (rho +0.21 against span, +0.06 against gaps over an hour) but falls as a session grows (−0.45 against size): a long session amortises each re-cache over thousands of cheap reads, while a tiny one never amortises its first write at all. The worst ratio in that set — 37% — belongs to a 75K-token session that ran for minutes with no gaps.
+
+What *does* track elapsed gaps is the absolute cache-**write** volume (rho +0.93), since every gap past the cache TTL forces the prefix to be re-sent. So a long, interrupted session really is paying to re-cache repeatedly; the ratio just hides it behind the reads. Height plus colour shows both: a tall red bar is a large session that is also re-caching heavily.
+
 Cost estimation is deliberately **not** included: it needs a per-model price table (base input, output, 5m and 1h cache writes, cache reads) that would silently go stale, and sessions routinely span several models. `--by-model` already reports at the granularity such an estimate needs — including the 1h/5m cache-write split, which is billed at different rates — so it can be added behind its own flag without reparsing anything.
 
 ## Re-homing a moved project

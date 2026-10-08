@@ -153,6 +153,12 @@ assert_present "list shows CREATED column" "CREATED"
 # Alpha is selected by default; its transcript renders in the preview pane.
 assert_present "preview shows selected session transcript" "searching for needle"
 
+# The token bar: one cell per row, height = billed volume, colour =
+# uncached share. The alpha fixture has usage, beta has less.
+assert_present "list draws a token bar" "▁"
+assert_present "status line explains the token bar" "tokens ▁▃▅▇█"
+assert_present "token legend names the colour axis" "uncached"
+
 echo "metadata filter (/)"
 send "/"
 type_text "beta"
