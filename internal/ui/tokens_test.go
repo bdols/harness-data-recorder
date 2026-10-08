@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bdols/claude-session-browser/internal/session"
@@ -63,10 +65,61 @@ func TestUncachedShare(t *testing.T) {
 // A session with no recorded usage must occupy the column without
 // drawing a bar, so rows stay aligned.
 func TestTokenCellBlankWithoutUsage(t *testing.T) {
-	if got := tokenCell(session.Session{}); got != "  " {
-		t.Errorf("tokenCell(empty) = %q, want two spaces", got)
+	if got := tokenCell(session.Session{}); got != "   " {
+		t.Errorf("tokenCell(empty) = %q, want three spaces", got)
 	}
-	if got := tokenCell(session.Session{Tokens: session.Tokens{Output: 1}}); got == "  " {
+	if got := tokenCell(session.Session{Tokens: session.Tokens{Output: 1}}); strings.TrimSpace(got) == "" {
 		t.Error("a session with usage should draw a bar")
+	}
+}
+
+// The cache signal must survive on shape alone: red-green colour
+// blindness erases a green-to-red ramp, so density does the work and
+// colour only reinforces it.
+func TestCacheShadeIsDistinctByShape(t *testing.T) {
+	low, _ := cacheShade(0)
+	mid, _ := cacheShade(5)
+	high, _ := cacheShade(15)
+	if low == mid || mid == high || low == high {
+		t.Fatalf("shades must differ by glyph: %q %q %q", low, mid, high)
+	}
+	// Denser glyph for a larger uncached share, so the ordering reads
+	// correctly without any colour at all.
+	if low != "░" || mid != "▒" || high != "▓" {
+		t.Errorf("got %q/%q/%q, want ░/▒/▓ in increasing density", low, mid, high)
+	}
+	// Boundaries are inclusive at the lower edge of each band.
+	if g, _ := cacheShade(4); g != "░" {
+		t.Errorf("4%% = %q, want ░", g)
+	}
+	if g, _ := cacheShade(14); g != "▒" {
+		t.Errorf("14%% = %q, want ▒", g)
+	}
+	if g, _ := cacheShade(100); g != "▓" {
+		t.Errorf("100%% = %q, want ▓", g)
+	}
+}
+
+// None of the three colours may sit on the red-green axis.
+func TestCacheShadeAvoidsRedGreen(t *testing.T) {
+	banned := map[string]string{
+		"42": "green", "46": "green", "40": "green", "2": "green",
+		"196": "red", "203": "red", "160": "red", "1": "red",
+	}
+	for _, share := range []int{0, 5, 15} {
+		_, style := cacheShade(share)
+		c := fmt.Sprintf("%v", style.GetForeground())
+		if name, bad := banned[c]; bad {
+			t.Errorf("share %d%% uses %s (colour %s); the palette must avoid the red-green axis", share, name, c)
+		}
+	}
+}
+
+func TestPctGuardsZero(t *testing.T) {
+	if got := pct(5, 0); got != 0 {
+		t.Errorf("pct(5,0) = %d, want 0", got)
+	}
+	if got := pct(1, 4); got != 25 {
+		t.Errorf("pct(1,4) = %d, want 25", got)
 	}
 }

@@ -322,6 +322,24 @@ assert_present "inspect card shows billed tokens" "billed"
 assert_present "inspect card shows the cache line" "read"
 send Escape
 
+echo "usage view (u)"
+launch
+send u
+wait_for "Token usage" 5
+assert_present "u opens the usage view" "Token usage"
+assert_present "usage view shows the billed column" "BILLED"
+assert_present "usage view shows the uncached column" "UNCACH"
+assert_present "usage view totals the set" "TOTAL"
+send m
+wait_for "MODEL" 5
+assert_present "m toggles the per-model breakdown" "claude-opus-4-8"
+send m
+wait_for "PROJECT" 5
+assert_present "m toggles back to sessions" "PROJECT"
+send Escape
+wait_for "MODIFIED" 5
+assert_present "esc returns to the list" "MODIFIED"
+
 echo "markdown export (e)"
 mkdir -p "$WORK/empty-sessions"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null

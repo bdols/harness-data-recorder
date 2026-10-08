@@ -38,6 +38,7 @@ const (
 	modeCommands
 	modeRehome
 	modeReplace
+	modeTokens
 )
 
 var (
@@ -56,7 +57,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · t name win · / filter · s search · b backup · m re-home · x redact · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · u usage · t name win · / filter · s search · b backup · m re-home · x redact · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -113,6 +114,11 @@ type Model struct {
 	commandCursor int
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
+
+	// Token-usage browser state.
+	tokenRows    []tokenRow
+	tokenCursor  int
+	tokenByModel bool
 
 	// Re-home (move a session to another project directory) and redact
 	// (literal text substitution) both act on opOn, captured when the
@@ -401,6 +407,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case modeTokens:
+		return m.handleTokensKey(msg)
+
 	case modeRehome:
 		return m.handleRehomeKey(msg)
 
@@ -625,6 +634,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if s := m.selected(); s != nil {
 				return m.exportMarkdownFile(*s, "")
 			}
+		case "u":
+			m.openTokens()
 		case "c":
 			m.status = "auditing tool calls…"
 			return m, auditCmd(m.root, m.restoreDir())
@@ -1418,6 +1429,8 @@ func (m Model) View() string {
 		return m.viewRunning()
 	case modeCommands:
 		return m.viewCommands()
+	case modeTokens:
+		return m.viewTokens()
 	case modeRehome:
 		return m.viewRehome()
 	case modeReplace:
@@ -1942,6 +1955,198 @@ func (m Model) liveCell(id string, w int) string {
 	return style.Render(fmt.Sprintf("%-*s", w, truncate(label, w)))
 }
 
+// tokenRow is one line of the usage view: a session, or in by-model mode
+// an aggregate across sessions.
+type tokenRow struct {
+	label   string
+	detail  string
+	tokens  session.Tokens
+	context int
+	id      string // session id; empty for model aggregates
+}
+
+// openTokens builds the usage view over the currently visible sessions,
+// so a filter in the list carries through to the numbers.
+func (m *Model) openTokens() {
+	m.mode = modeTokens
+	m.tokenCursor = 0
+	m.buildTokenRows()
+	if len(m.tokenRows) == 0 {
+		m.mode = modeList
+		m.status = "no token usage recorded for these sessions"
+	}
+}
+
+func (m *Model) buildTokenRows() {
+	m.tokenRows = nil
+	if m.tokenByModel {
+		agg := map[string]session.Tokens{}
+		for _, s := range m.filtered {
+			for model, t := range s.ByModel {
+				cur := agg[model]
+				cur.Add(t)
+				agg[model] = cur
+			}
+		}
+		for model, t := range agg {
+			if t.Billed() == 0 {
+				continue // e.g. <synthetic>, which records no usage
+			}
+			m.tokenRows = append(m.tokenRows, tokenRow{label: shortModel(model), detail: model, tokens: t})
+		}
+	} else {
+		for _, s := range m.filtered {
+			if s.Tokens.Billed() == 0 {
+				continue
+			}
+			m.tokenRows = append(m.tokenRows, tokenRow{
+				label: projName(s.CWD), detail: s.Title,
+				tokens: s.Tokens, context: s.ContextTokens, id: s.ID,
+			})
+		}
+	}
+	sort.Slice(m.tokenRows, func(i, j int) bool {
+		return m.tokenRows[i].tokens.Billed() > m.tokenRows[j].tokens.Billed()
+	})
+}
+
+// handleTokensKey drives the usage view.
+func (m Model) handleTokensKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "h", "left":
+		m.mode = modeList
+		m.tokenRows = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.tokenCursor > 0 {
+			m.tokenCursor--
+		}
+	case "down", "j":
+		if m.tokenCursor < len(m.tokenRows)-1 {
+			m.tokenCursor++
+		}
+	case "g", "home":
+		m.tokenCursor = 0
+	case "G", "end":
+		m.tokenCursor = len(m.tokenRows) - 1
+		if m.tokenCursor < 0 {
+			m.tokenCursor = 0
+		}
+	case "m":
+		m.tokenByModel = !m.tokenByModel
+		m.tokenCursor = 0
+		m.buildTokenRows()
+	case "enter", "v", "l", "right":
+		// Only session rows have somewhere to go.
+		if r := m.selectedTokenRow(); r != nil && r.id != "" {
+			for i := range m.filtered {
+				if m.filtered[i].ID == r.id {
+					m.detailOf = &m.filtered[i]
+					m.detailBack = modeTokens
+					m.mode = modeDetail
+					m.setDetailContent()
+					break
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) selectedTokenRow() *tokenRow {
+	if m.tokenCursor < 0 || m.tokenCursor >= len(m.tokenRows) {
+		return nil
+	}
+	return &m.tokenRows[m.tokenCursor]
+}
+
+// viewTokens renders the usage table: billed volume broken into the
+// components that are charged differently, with the cache-read share
+// spelled out as a number rather than left to the bar's shading.
+func (m Model) viewTokens() string {
+	var total session.Tokens
+	for _, r := range m.tokenRows {
+		total.Add(r.tokens)
+	}
+	scope := fmt.Sprintf("%d sessions", len(m.tokenRows))
+	if m.tokenByModel {
+		scope = fmt.Sprintf("%d models", len(m.tokenRows))
+	}
+	head := styleTitle.Render("Token usage") + "\n" +
+		styleDim.Render(fmt.Sprintf("%s · %s billed · %d%% cache reads · m toggles per-model",
+			scope, humanCount(total.Billed()), pct(total.CacheRead, total.Billed())))
+
+	nW, labelW := 8, 14
+	header := "   " + styleHeader.Render(fmt.Sprintf(" %*s  %*s  %*s  %*s  %*s  %*s  %-*s  %-s ",
+		nW, "BILLED", nW, "INPUT", nW, "CACHE W", nW, "CACHE R", nW, "OUTPUT", 6, "UNCACH",
+		labelW, m.tokenScopeHeader(), m.tokenDetailHeader()))
+	detailW := m.width - (nW*5 + 6 + labelW + 24)
+	if detailW < 8 {
+		detailW = 8
+	}
+
+	rows := m.height - 6
+	if rows < 1 {
+		rows = 1
+	}
+	start := 0
+	if m.tokenCursor >= rows {
+		start = m.tokenCursor - rows + 1
+	}
+	end := start + rows
+	if end > len(m.tokenRows) {
+		end = len(m.tokenRows)
+	}
+
+	var b strings.Builder
+	b.WriteString(head + "\n" + header + "\n")
+	for i := start; i < end; i++ {
+		r := m.tokenRows[i]
+		t := r.tokens
+		shade, shadeStyle := cacheShade(uncachedShare(t))
+		bar := shadeStyle.Render(tokenGlyph(t.Billed()) + shade)
+		body := fmt.Sprintf(" %*s  %*s  %*s  %*s  %*s  %5d%%  %-*s  %-s ",
+			nW, humanCount(t.Billed()), nW, humanCount(t.Input), nW, humanCount(t.CacheWrite),
+			nW, humanCount(t.CacheRead), nW, humanCount(t.Output), uncachedShare(t),
+			labelW, truncate(r.label, labelW), truncate(r.detail, detailW))
+		if i == m.tokenCursor {
+			body = styleSelected.Render(body)
+		}
+		b.WriteString(" " + bar + body + "\n")
+	}
+	for i := end - start; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(styleStatus.Render(fmt.Sprintf("  TOTAL %s billed · %s cache reads · %s output · %s cache writes",
+		humanCount(total.Billed()), humanCount(total.CacheRead), humanCount(total.Output), humanCount(total.CacheWrite))) + "\n")
+	b.WriteString(styleStatus.Render(" ↑/↓ select · m per-model · enter → session · esc back"))
+	return b.String()
+}
+
+func (m Model) tokenScopeHeader() string {
+	if m.tokenByModel {
+		return "MODEL"
+	}
+	return "PROJECT"
+}
+
+func (m Model) tokenDetailHeader() string {
+	if m.tokenByModel {
+		return "FULL NAME"
+	}
+	return "TITLE"
+}
+
+// pct is a percentage guarded against a zero denominator.
+func pct(n, of int) int {
+	if of == 0 {
+		return 0
+	}
+	return 100 * n / of
+}
+
 // tokenRamp is a half-decade ladder of block heights: each step is ~3x
 // the tokens of the one below, so four orders of magnitude fit in one
 // cell. Billed volume spans 75K to 350M across real sessions, which no
@@ -1971,18 +2176,29 @@ var tokenRamp = []struct {
 func tokenCell(s session.Session) string {
 	billed := s.Tokens.Billed()
 	if billed == 0 {
-		return "  "
+		return "   "
 	}
-	var style lipgloss.Style
-	switch share := uncachedShare(s.Tokens); {
+	shade, style := cacheShade(uncachedShare(s.Tokens))
+	return style.Render(tokenGlyph(billed)+shade) + " "
+}
+
+// cacheShade encodes the uncached share as fill density — more ink means
+// more of the session was charged at full rate.
+//
+// Density, not hue, carries the meaning. A green-to-red ramp would put
+// the entire signal on the one axis red-green colour blindness erases,
+// and this codebase already settled that question for the running-status
+// markers: encode by shape first, colour second. The colours here are
+// the same blue/orange/magenta set, which avoids the red-green axis.
+func cacheShade(share int) (string, lipgloss.Style) {
+	switch {
 	case share >= 15:
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // red: mostly uncached
+		return "▓", lipgloss.NewStyle().Foreground(lipgloss.Color("165")) // magenta
 	case share >= 5:
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber
+		return "▒", lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange
 	default:
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("42")) // green: well cached
+		return "░", lipgloss.NewStyle().Foreground(lipgloss.Color("33")) // blue
 	}
-	return style.Render(tokenGlyph(billed)) + " "
 }
 
 // tokenGlyph picks the bar height for a billed-token count.
@@ -2046,9 +2262,9 @@ func (m Model) viewList() string {
 			break
 		}
 	}
-	// Token bar: one cell whose height is the session's billed volume and
-	// whose colour is the share that missed cache. Costs 2 columns.
-	const tokW = 2
+	// Token bar: bar height is billed volume, the shade beside it is the
+	// share that missed cache. Costs 3 columns (bar, shade, gap).
+	const tokW = 3
 	var titleW int
 	if previewOn {
 		projW = 12
@@ -2212,10 +2428,12 @@ func (m Model) statusAndHelp() (status, help string) {
 func (m Model) tokenLegend() string {
 	for _, s := range m.filtered {
 		if s.Tokens.Billed() > 0 {
-			g := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("▇")
-			a := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("▇")
-			r := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("▇")
-			return styleStatus.Render(" · tokens ▁▃▅▇█ · ") + g + a + r + styleStatus.Render(" uncached")
+			var shades string
+			for _, share := range []int{0, 5, 15} {
+				g, st := cacheShade(share)
+				shades += st.Render(g)
+			}
+			return styleStatus.Render(" · tokens ▁▃▅▇█ · ") + shades + styleStatus.Render(" uncached · u usage")
 		}
 	}
 	return ""

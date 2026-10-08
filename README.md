@@ -140,11 +140,13 @@ The columns stay **split rather than totalled**, because the split is the whole 
 
 `CONTEXT` is a different measurement from the rest: it's the size of the **last** call, not a sum. Every API call resends the whole conversation, so summing `input_tokens` would multiply the same text by the message count. The billed columns are per-call sums (what you were charged); `CONTEXT` is how big the conversation had grown.
 
-The inspect card (`i`) shows the same breakdown for one session, including what share of its billed tokens were cache reads.
+Press **`u`** for the usage view: every visible session as a table — billed, input, cache writes, cache reads, output, uncached % — biggest first, with a total line. `m` toggles between per-session and per-model aggregation, `enter` opens the session's transcript, `esc` returns. It respects the list filter, so `/obsidian` then `u` scopes the numbers to that project. The inspect card (`i`) shows the same breakdown for a single session.
 
 ### The token bar in the list
 
-Each row carries a one-cell bar whose **height is how much was billed** (`▁▂▃▄▅▆▇█`, half-decade steps from 100K to 100M+, because real sessions span four orders of magnitude) and whose **colour is how much of that missed cache** — green under 5%, amber to 15%, red above. "Uncached" means fresh input plus cache writes: the tokens charged at full rate or more, as opposed to cache reads charged at a fraction.
+Each row carries a two-cell indicator. The **bar height is how much was billed** (`▁▂▃▄▅▆▇█`, half-decade steps from 100K to 100M+, because real sessions span four orders of magnitude). The **shade beside it is how much of that missed cache** — `░` under 5%, `▒` to 15%, `▓` above. "Uncached" means fresh input plus cache writes: the tokens charged at full rate or more, as opposed to cache reads charged at a fraction.
+
+Density carries the meaning, not hue. A green-to-red ramp would put the entire signal on the one axis red-green colour blindness erases; the shades are legible with no colour at all, and the colours that do reinforce them (blue / orange / magenta) stay off that axis, matching what the running-status markers already do.
 
 The two axes are deliberately separate, because they answer different questions and move in opposite directions. Measured over 27 real sessions here, the cache-miss *ratio* barely tracks how long a session ran (rho +0.21 against span, +0.06 against gaps over an hour) but falls as a session grows (−0.45 against size): a long session amortises each re-cache over thousands of cheap reads, while a tiny one never amortises its first write at all. The worst ratio in that set — 37% — belongs to a 75K-token session that ran for minutes with no gaps.
 
