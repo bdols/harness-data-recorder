@@ -136,9 +136,15 @@ csb --tokens obsidian        # filter by project, title or id
 csb --tokens --by-model      # same totals split by issuing model
 ```
 
-The columns stay **split rather than totalled**, because the split is the whole story. On a real set of 27 sessions here, cache reads were **93% of all billed tokens** (1.42B of 1.51B) — and cache reads cost a fraction of base input. A single "tokens used" figure is dominated by the cheapest component and tells you little about either spend or context size.
+The columns stay **split rather than totalled**, because the split is the whole story. On a real set of 27 sessions, cache reads were **94% of all billed tokens** (733M of 773M) — and cache reads cost a fraction of base input. A single "tokens used" figure is dominated by the cheapest component and tells you little about either spend or context size.
+
+Usage is counted **once per API response, not once per record**. Claude Code writes a single response as several records when it makes tool calls — the text, then one per call — and copies the same `usage` block into each. Counting per record inflated real totals by **149%**.
 
 `CONTEXT` is a different measurement from the rest: it's the size of the **last** call, not a sum. Every API call resends the whole conversation, so summing `input_tokens` would multiply the same text by the message count. The billed columns are per-call sums (what you were charged); `CONTEXT` is how big the conversation had grown.
+
+Opening a transcript (`v`) annotates each assistant turn with what that call billed — `↑ 45.2k ctx · ↓ 1.2k out` — and flags the turns that **rebuilt an expired cache**: `⟳ cache rebuilt, 382.6k re-sent`. Caching is normally incremental (a median of ~900 tokens per turn on a real session) until the TTL lapses and the whole conversation must be re-sent, which lands as a p99 of ~380,000. About 3–4% of turns on real sessions, and they are where the cost actually is. `t` toggles the annotations.
+
+Context is shown rather than raw input because `input_tokens` alone misleads: on a cached conversation it is a handful of tokens while the call actually carried the entire history.
 
 Press **`u`** for the usage view: every visible session as a table — billed, input, cache writes, cache reads, output, uncached % — biggest first, with a total line. `m` toggles between per-session and per-model aggregation, `enter` opens the session's transcript, `esc` returns. It respects the list filter, so `/obsidian` then `u` scopes the numbers to that project. The inspect card (`i`) shows the same breakdown for a single session.
 
@@ -148,7 +154,7 @@ Each row carries a two-cell indicator. The **bar height is how much was billed**
 
 Density carries the meaning, not hue. A green-to-red ramp would put the entire signal on the one axis red-green colour blindness erases; the shades are legible with no colour at all, and the colours that do reinforce them (blue / orange / magenta) stay off that axis, matching what the running-status markers already do.
 
-The two axes are deliberately separate, because they answer different questions and move in opposite directions. Measured over 27 real sessions here, the cache-miss *ratio* barely tracks how long a session ran (rho +0.21 against span, +0.06 against gaps over an hour) but falls as a session grows (−0.45 against size): a long session amortises each re-cache over thousands of cheap reads, while a tiny one never amortises its first write at all. The worst ratio in that set — 37% — belongs to a 75K-token session that ran for minutes with no gaps.
+The two axes are deliberately separate, because they answer different questions and move in opposite directions. Measured over 27 real sessions, the cache-miss *ratio* barely tracks how long a session ran (rho +0.12 against span, −0.01 against gaps over an hour) but falls as a session grows (−0.51 against size): a long session amortises each re-cache over thousands of cheap reads, while a tiny one never amortises its first write at all. The worst ratio in that set — 37% — belongs to a session that ran for minutes with no gaps at all.
 
 What *does* track elapsed gaps is the absolute cache-**write** volume (rho +0.93), since every gap past the cache TTL forces the prefix to be re-sent. So a long, interrupted session really is paying to re-cache repeatedly; the ratio just hides it behind the reads. Height plus colour shows both: a tall red bar is a large session that is also re-caching heavily.
 

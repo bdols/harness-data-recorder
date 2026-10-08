@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -304,5 +305,68 @@ func TestTokenAccountingAbsent(t *testing.T) {
 	}
 	if s.Tokens.Billed() != 0 || s.ContextTokens != 0 || len(s.ByModel) != 0 {
 		t.Errorf("want zero usage, got %+v ctx=%d byModel=%v", s.Tokens, s.ContextTokens, s.ByModel)
+	}
+}
+
+// Claude Code writes one API response as several records when it makes
+// tool calls — the text, then one per call — each carrying an identical
+// copy of the usage block. Counting per record inflated real totals by
+// ~149%, so usage must be counted once per response id.
+func TestTokenAccountingDedupesSplitResponses(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sid.jsonl")
+	// One response (msg_a) spread over three records, then a separate one.
+	body := `{"type":"ai-title","aiTitle":"T","sessionId":"sid"}
+{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}},"timestamp":"2026-05-01T10:00:00Z"}
+{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}},"timestamp":"2026-05-01T10:00:00Z"}
+{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/x"}}],"usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}},"timestamp":"2026-05-01T10:00:00Z"}
+{"type":"assistant","message":{"id":"msg_b","model":"claude-opus-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":5,"output_tokens":50,"cache_read_input_tokens":2000,"cache_creation_input_tokens":0}},"timestamp":"2026-05-01T10:01:00Z"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// msg_a counted once (10/200/1000/100) plus msg_b (5/0/2000/50).
+	want := Tokens{Input: 15, CacheWrite: 200, CacheRead: 3000, Output: 150}
+	if s.Tokens != want {
+		t.Errorf("Tokens = %+v, want %+v (msg_a must count once, not three times)", s.Tokens, want)
+	}
+	if m := s.ByModel["claude-opus-5"]; m != want {
+		t.Errorf("ByModel = %+v, want %+v", m, want)
+	}
+
+	// The transcript annotation must likewise appear once per response,
+	// on the turn's final entry, not repeated after every tool call.
+	entries, err := LoadTranscript(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var annotated int
+	var lastAnnotatedRole string
+	for _, e := range entries {
+		if e.Context > 0 || e.Tokens.Output > 0 {
+			annotated++
+			lastAnnotatedRole = e.Role
+		}
+	}
+	if annotated != 2 {
+		t.Errorf("%d annotated entries, want 2 (one per response): %+v", annotated, entries)
+	}
+	if lastAnnotatedRole != "assistant" {
+		t.Errorf("last annotation on %q, want the assistant text of msg_b", lastAnnotatedRole)
+	}
+	// msg_a's annotation belongs to its final entry, the Read tool call.
+	for i, e := range entries {
+		if e.Role == "tool" && strings.HasPrefix(e.Text, "Read") {
+			if e.Context == 0 {
+				t.Errorf("entry %d (%s) should carry msg_a's usage", i, e.Text)
+			}
+		}
+		if e.Role == "tool" && strings.HasPrefix(e.Text, "Bash") && e.Context != 0 {
+			t.Errorf("entry %d (%s) should not repeat msg_a's usage", i, e.Text)
+		}
 	}
 }

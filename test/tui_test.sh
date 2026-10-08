@@ -322,6 +322,25 @@ assert_present "inspect card shows billed tokens" "billed"
 assert_present "inspect card shows the cache line" "read"
 send Escape
 
+echo "per-turn tokens in the transcript (t)"
+launch
+send v
+# Barrier on the detail view's own footer: the split-pane preview already
+# shows the transcript text, so waiting on that passes while still in the
+# list.
+wait_for "t tokens" 5
+# Alpha's assistant turn: 10 input + 100 cache read = 110 ctx, 5 output.
+assert_present "transcript annotates the turn's context" "110 ctx"
+assert_present "transcript annotates the turn's output" "5 out"
+send t
+wait_absent "110 ctx" 5
+assert_absent "t hides the per-turn tokens" "110 ctx"
+assert_present "transcript text survives the toggle" "searching for needle"
+send t
+wait_for "110 ctx" 5
+assert_present "t shows them again" "110 ctx"
+send Escape
+
 echo "usage view (u)"
 launch
 send u

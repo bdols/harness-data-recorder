@@ -115,6 +115,10 @@ type Model struct {
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
 
+	// showTurnTokens annotates each assistant turn in the transcript
+	// reader with what that call billed.
+	showTurnTokens bool
+
 	// Token-usage browser state.
 	tokenRows    []tokenRow
 	tokenCursor  int
@@ -169,8 +173,9 @@ func New(root, backupDir string, autoBackup bool) Model {
 	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup,
 		filter: ti, search: si, cmdFilter: ci,
 		rehomeInput: hi, replaceFrom: rf, replaceTo: rt,
-		replaceAll: true,
-		live:       map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
+		replaceAll:     true,
+		showTurnTokens: true,
+		live:           map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -490,6 +495,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modeDetail:
 		switch msg.String() {
+		case "t":
+			m.showTurnTokens = !m.showTurnTokens
+			m.setDetailContent()
+			return m, nil
 		case "q", "esc", "h", "left":
 			back := m.detailBack
 			m.detailBack = modeList
@@ -1407,6 +1416,11 @@ func (m *Model) setDetailContent() {
 		case "tool":
 			b.WriteString(styleTool.Render("  ⚙ "+truncate(e.Text, w-4)) + "\n")
 		}
+		if m.showTurnTokens {
+			if note := turnTokenNote(e); note != "" {
+				b.WriteString(note + "\n\n")
+			}
+		}
 	}
 	m.detail.SetContent(b.String())
 	m.detail.GotoTop()
@@ -1919,7 +1933,7 @@ func (m Model) viewDetail() string {
 	s := m.detailOf
 	head := styleTitle.Render(truncate(s.Title, m.width-1)) + "\n" +
 		styleDim.Render(truncate(fmt.Sprintf("%s · %s · %d msgs · %s", shortPath(s.CWD), s.Model, s.UserMsgs+s.AsstMsgs, s.ID), m.width-1))
-	foot := styleStatus.Render("↑/↓ scroll · enter resume · esc back")
+	foot := styleStatus.Render("↑/↓ scroll · t tokens · i inspect · e export · enter resume · esc back")
 	return head + "\n" + m.detail.View() + "\n" + foot
 }
 
@@ -1953,6 +1967,31 @@ func (m Model) liveCell(id string, w int) string {
 	}
 	_, style := liveMarker(ls.Status)
 	return style.Render(fmt.Sprintf("%-*s", w, truncate(label, w)))
+}
+
+// turnTokenNote renders what one assistant turn billed, as a dim footer
+// under the reply. Returns "" for entries that carry no usage.
+//
+// Context is shown rather than input because input_tokens alone is
+// misleading — on a cached conversation it is a handful of tokens while
+// the call actually carried the whole history. A turn that rebuilt an
+// expired cache is called out, since that is the one event here with a
+// real cost attached and it is otherwise invisible.
+func turnTokenNote(e session.Entry) string {
+	if e.Context == 0 && e.Tokens.Output == 0 {
+		return ""
+	}
+	parts := fmt.Sprintf("    ↑ %s ctx · ↓ %s out", humanCount(e.Context), humanCount(e.Tokens.Output))
+	if e.Tokens.Thinking > 0 {
+		parts += fmt.Sprintf(" (%s thinking)", humanCount(e.Tokens.Thinking))
+	}
+	if e.Recached() {
+		// Shape, not colour: the marker has to survive both a mono
+		// terminal and red-green colour blindness.
+		return styleDim.Render(parts) +
+			styleStatus.Render(fmt.Sprintf("  ⟳ cache rebuilt, %s re-sent", humanCount(e.Tokens.CacheWrite)))
+	}
+	return styleDim.Render(parts)
 }
 
 // tokenRow is one line of the usage view: a session, or in by-model mode

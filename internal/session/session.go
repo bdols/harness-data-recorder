@@ -91,6 +91,11 @@ type line struct {
 }
 
 type message struct {
+	// ID is the API response id. Claude Code writes one response as
+	// several records — the text, then one per tool call — and copies the
+	// same usage block into each, so usage must be counted once per ID or
+	// it inflates by the number of tool calls in the turn.
+	ID      string          `json:"id"`
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Content json.RawMessage `json:"content"`
@@ -209,6 +214,7 @@ func parseFile(path string) (Session, error) {
 		ID:   strings.TrimSuffix(filepath.Base(path), ".jsonl"),
 		Path: path,
 	}
+	seenUsage := map[string]bool{}
 	var mtime time.Time
 	if fi, err := f.Stat(); err == nil {
 		s.Size = fi.Size()
@@ -259,7 +265,7 @@ func parseFile(path string) (Session, error) {
 				if l.Message.Model != "" && !strings.HasPrefix(l.Message.Model, "<") {
 					s.Model = l.Message.Model
 				}
-				if u := l.Message.Usage; u != nil {
+				if u := l.Message.Usage; u != nil && !countedUsage(seenUsage, l.Message.ID) {
 					t := u.tokens()
 					s.Tokens.Add(t)
 					if m := l.Message.Model; m != "" {
@@ -338,6 +344,46 @@ type Entry struct {
 	Role string // "user", "assistant" or "tool"
 	Text string
 	Time time.Time
+
+	// Tokens and Context are set on the LAST entry produced by an
+	// assistant record — the end of that turn — since one record can emit
+	// several entries (a reply plus its tool calls) but carries a single
+	// usage block. Zero on every other entry.
+	Tokens  Tokens
+	Context int // conversation size for this call: input + cache read + cache write
+}
+
+// countedUsage reports whether this API response's usage has already
+// been counted, recording it if not.
+//
+// One response spans several records when it makes tool calls, each
+// carrying an identical copy of the usage block. Counting per record
+// inflated totals by ~149% on a real session. An empty id cannot be
+// deduplicated, so it is counted — under-counting would be worse than
+// the rare duplicate.
+func countedUsage(seen map[string]bool, id string) bool {
+	if id == "" {
+		return false
+	}
+	if seen[id] {
+		return true
+	}
+	seen[id] = true
+	return false
+}
+
+// Recached reports whether this turn rebuilt an expired prompt cache
+// rather than extending a live one.
+//
+// Caching is normally incremental: a turn writes just the new material,
+// a few hundred to a few thousand tokens. When the cache TTL lapses —
+// after a break longer than the entry's lifetime — the next call must
+// re-send the whole conversation, and cache writes jump by orders of
+// magnitude. Measured over one real session the median write was ~900
+// tokens against a p99 of ~380,000, so the two modes are far enough
+// apart that a simple majority-of-context test separates them cleanly.
+func (e Entry) Recached() bool {
+	return e.Context > 0 && e.Tokens.CacheWrite*2 > e.Context
 }
 
 var commandNameRe = regexp.MustCompile(`<command-name>([^<]*)</command-name>`)
@@ -426,6 +472,10 @@ func LoadTranscript(path string) ([]Entry, error) {
 	defer f.Close()
 
 	var entries []Entry
+	// Track which entry currently carries the running response's usage,
+	// so a response split across records annotates its last entry once
+	// rather than repeating the same figures after every tool call.
+	curID, curAnnot := "", -1
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), maxLineSize)
 	for sc.Scan() {
@@ -463,6 +513,7 @@ func LoadTranscript(path string) ([]Entry, error) {
 			if err := json.Unmarshal(l.Message.Content, &blocks); err != nil {
 				continue
 			}
+			before := len(entries)
 			for _, b := range blocks {
 				switch b.Type {
 				case "text":
@@ -472,6 +523,24 @@ func LoadTranscript(path string) ([]Entry, error) {
 				case "tool_use":
 					entries = append(entries, Entry{Role: "tool", Text: b.Name + toolInputSummary(b.Input), Time: ts})
 				}
+			}
+			// Hang this call's usage off the turn's final entry, so the
+			// figures read as a footer to what was just said rather than a
+			// header to it.
+			if u := l.Message.Usage; u != nil && len(entries) > before {
+				id := l.Message.ID
+				if id != "" && id == curID && curAnnot >= 0 {
+					// Same response continued in a later record: clear the
+					// earlier annotation so the figures appear once, at the
+					// end of the turn.
+					entries[curAnnot].Tokens = Tokens{}
+					entries[curAnnot].Context = 0
+				}
+				tk := u.tokens()
+				idx := len(entries) - 1
+				entries[idx].Tokens = tk
+				entries[idx].Context = tk.Input + tk.CacheRead + tk.CacheWrite
+				curID, curAnnot = id, idx
 			}
 		}
 	}
