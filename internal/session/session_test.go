@@ -64,7 +64,7 @@ func TestParseFileFields(t *testing.T) {
 		{"UserMsgs", s.UserMsgs, 1}, // meta + command excluded
 		{"AsstMsgs", s.AsstMsgs, 2},
 		{"ToolCalls", s.ToolCalls, 2},
-		{"OutputTokens", s.OutputTokens, 50},    // 20 + 30
+		{"Tokens.Output", s.Tokens.Output, 50},  // 20 + 30
 		{"ContextTokens", s.ContextTokens, 200}, // 50+150+0 at last turn
 	}
 	for _, c := range checks {
@@ -244,5 +244,65 @@ func TestToolCallsModelSandboxSubagent(t *testing.T) {
 		if g != w {
 			t.Errorf("call %d = %+v, want %+v", i, g, w)
 		}
+	}
+}
+
+// Token accounting: billed counters sum per API call, context does not
+// (each call resends the conversation), and the per-model split is what
+// a later cost estimate needs.
+func TestTokenAccounting(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sid.jsonl")
+	body := `{"type":"ai-title","aiTitle":"T","sessionId":"sid"}
+{"type":"assistant","message":{"model":"claude-opus-5","content":[],"usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"output_tokens_details":{"thinking_tokens":40},"cache_creation":{"ephemeral_1h_input_tokens":150,"ephemeral_5m_input_tokens":50}}},"timestamp":"2026-05-01T10:00:00Z"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","content":[],"usage":{"input_tokens":5,"output_tokens":20,"cache_read_input_tokens":3000,"cache_creation_input_tokens":0}},"timestamp":"2026-05-01T10:01:00Z"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.Tokens
+	want := Tokens{Input: 15, CacheWrite: 200, CacheWrite1h: 150, CacheWrite5m: 50,
+		CacheRead: 4000, Output: 120, Thinking: 40}
+	if got != want {
+		t.Errorf("Tokens = %+v, want %+v", got, want)
+	}
+	if b := got.Billed(); b != 15+200+4000+120 {
+		t.Errorf("Billed = %d, want %d", b, 15+200+4000+120)
+	}
+	// Context is the last call's size, not a running sum.
+	if s.ContextTokens != 3005 {
+		t.Errorf("ContextTokens = %d, want 3005 (last call only)", s.ContextTokens)
+	}
+	if len(s.ByModel) != 2 {
+		t.Fatalf("ByModel has %d entries, want 2: %+v", len(s.ByModel), s.ByModel)
+	}
+	if o := s.ByModel["claude-opus-5"]; o.Output != 100 || o.CacheRead != 1000 || o.Thinking != 40 {
+		t.Errorf("opus split = %+v", o)
+	}
+	if n := s.ByModel["claude-sonnet-5"]; n.Output != 20 || n.CacheRead != 3000 {
+		t.Errorf("sonnet split = %+v", n)
+	}
+}
+
+// A session with no usage blocks must report zero, not crash or invent.
+func TestTokenAccountingAbsent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sid.jsonl")
+	body := `{"type":"ai-title","aiTitle":"T","sessionId":"sid"}
+{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-05-01T10:00:00Z"}
+`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Tokens.Billed() != 0 || s.ContextTokens != 0 || len(s.ByModel) != 0 {
+		t.Errorf("want zero usage, got %+v ctx=%d byModel=%v", s.Tokens, s.ContextTokens, s.ByModel)
 	}
 }

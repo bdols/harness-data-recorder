@@ -271,6 +271,51 @@ wait_for "Tool-call audit" 5
 assert_present "c opens the audit view" "Tool-call audit"
 assert_present "audit view shows the Bash call" "audit-marker-xyz"
 
+echo "token usage (--tokens and i)"
+# The alpha fixture records 10+3 input, 5+2 output, 100 cache read.
+TOK=$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens 2>/dev/null)
+if printf '%s' "$TOK" | grep -q "Alpha Session"; then
+	ok "--tokens lists sessions"
+else
+	bad "--tokens listed no sessions"
+fi
+# Billed sums every call; context is the last call alone. Alpha: billed
+# 10+100+5 = 115, context 10+100 = 110.
+if printf '%s' "$TOK" | grep -q "115"; then
+	ok "--tokens sums billed tokens across calls"
+else
+	bad "--tokens billed total wrong"
+	printf '%s\n' "$TOK" | sed 's/^/    /'
+fi
+if printf '%s' "$TOK" | grep -q "110"; then
+	ok "--tokens reports context as the last call, not a sum"
+else
+	bad "--tokens context wrong"
+fi
+if printf '%s' "$TOK" | grep -q "cache reads are"; then
+	ok "--tokens reports the cache-read share"
+else
+	bad "--tokens missing cache-read share"
+fi
+if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens --by-model 2>/dev/null | grep -q "claude-opus-4-8"; then
+	ok "--tokens --by-model splits by issuing model"
+else
+	bad "--by-model did not list the model"
+fi
+# Filter must narrow to one session.
+if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens beta 2>/dev/null | grep -c "Alpha Session")" = "0" ]; then
+	ok "--tokens filter excludes non-matching sessions"
+else
+	bad "--tokens filter did not narrow"
+fi
+# TUI: the inspect card shows the breakdown.
+launch
+send i
+wait_for "session id" 5
+assert_present "inspect card shows billed tokens" "billed"
+assert_present "inspect card shows the cache line" "read"
+send Escape
+
 echo "markdown export (e)"
 mkdir -p "$WORK/empty-sessions"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null

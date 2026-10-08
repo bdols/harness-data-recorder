@@ -32,8 +32,47 @@ type Session struct {
 	Version    string // Claude Code version that last wrote the session
 	Size       int64
 
-	OutputTokens  int // sum of output tokens across assistant messages
+	// Tokens is everything the API billed across the whole session;
+	// ByModel splits the same totals per issuing model, which a cost
+	// estimate needs because one session commonly spans several models.
+	Tokens        Tokens
+	ByModel       map[string]Tokens
 	ContextTokens int // context size at the last assistant message
+}
+
+// Tokens counts billed token usage.
+//
+// Input, CacheWrite and CacheRead are summed per API call, not per
+// conversation: every call resends the whole conversation, so these are
+// what was charged, NOT how big the context got. ContextTokens answers
+// that second question. The two differ by orders of magnitude once
+// caching is in play — cache reads routinely dominate a session's volume
+// while costing a fraction of base input — so a single "tokens used"
+// figure is close to meaningless and the split is the point.
+type Tokens struct {
+	Input      int
+	CacheWrite int // cache creation (total)
+	// Cache writes are billed at different rates per TTL, so cost needs
+	// them separated; they sum to CacheWrite.
+	CacheWrite1h int
+	CacheWrite5m int
+	CacheRead    int
+	Output       int
+	Thinking     int // extended thinking, a subset of Output
+}
+
+// Billed is every token the API charged for.
+func (t Tokens) Billed() int { return t.Input + t.CacheWrite + t.CacheRead + t.Output }
+
+// Add accumulates b into t.
+func (t *Tokens) Add(b Tokens) {
+	t.Input += b.Input
+	t.CacheWrite += b.CacheWrite
+	t.CacheWrite1h += b.CacheWrite1h
+	t.CacheWrite5m += b.CacheWrite5m
+	t.CacheRead += b.CacheRead
+	t.Output += b.Output
+	t.Thinking += b.Thinking
 }
 
 // line is a partial decode of one jsonl record; only the fields we
@@ -63,6 +102,33 @@ type usage struct {
 	OutputTokens  int `json:"output_tokens"`
 	CacheRead     int `json:"cache_read_input_tokens"`
 	CacheCreation int `json:"cache_creation_input_tokens"`
+	OutputDetails *struct {
+		Thinking int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
+	// cache_creation breaks the creation total down by TTL; the tiers
+	// are billed differently.
+	CacheTiers *struct {
+		Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+		Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+	} `json:"cache_creation"`
+}
+
+// tokens converts one message's usage into billed counts.
+func (u *usage) tokens() Tokens {
+	t := Tokens{
+		Input:      u.InputTokens,
+		CacheWrite: u.CacheCreation,
+		CacheRead:  u.CacheRead,
+		Output:     u.OutputTokens,
+	}
+	if u.OutputDetails != nil {
+		t.Thinking = u.OutputDetails.Thinking
+	}
+	if u.CacheTiers != nil {
+		t.CacheWrite1h = u.CacheTiers.Ephemeral1h
+		t.CacheWrite5m = u.CacheTiers.Ephemeral5m
+	}
+	return t
 }
 
 type contentBlock struct {
@@ -194,8 +260,19 @@ func parseFile(path string) (Session, error) {
 					s.Model = l.Message.Model
 				}
 				if u := l.Message.Usage; u != nil {
-					s.OutputTokens += u.OutputTokens
-					if ctx := u.InputTokens + u.CacheRead + u.CacheCreation; ctx > 0 {
+					t := u.tokens()
+					s.Tokens.Add(t)
+					if m := l.Message.Model; m != "" {
+						if s.ByModel == nil {
+							s.ByModel = map[string]Tokens{}
+						}
+						agg := s.ByModel[m]
+						agg.Add(t)
+						s.ByModel[m] = agg
+					}
+					// Context is the size of the last call, not a sum:
+					// each call resends the conversation.
+					if ctx := t.Input + t.CacheRead + t.CacheWrite; ctx > 0 {
 						s.ContextTokens = ctx
 					}
 				}

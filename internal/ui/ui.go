@@ -1788,10 +1788,21 @@ func (m Model) viewInspect() string {
 		return fmt.Sprintf("%s  %s", label(fmt.Sprintf("%12s", k)), v)
 	}
 	dur := s.LastTime.Sub(s.FirstTime)
-	tokens := "n/a"
-	if s.OutputTokens > 0 || s.ContextTokens > 0 {
-		tokens = fmt.Sprintf("%s output · %s context at last reply",
-			humanCount(s.OutputTokens), humanCount(s.ContextTokens))
+	t := s.Tokens
+	billed, cached, written := "n/a", "", ""
+	if t.Billed() > 0 || s.ContextTokens > 0 {
+		billed = fmt.Sprintf("%s billed · %s in · %s out",
+			humanCount(t.Billed()), humanCount(t.Input), humanCount(t.Output))
+		if t.Thinking > 0 {
+			billed += fmt.Sprintf(" (%s thinking)", humanCount(t.Thinking))
+		}
+		// Cache reads usually dwarf everything else, so they get their own
+		// line rather than hiding inside a single total.
+		cached = fmt.Sprintf("%s read · %s written", humanCount(t.CacheRead), humanCount(t.CacheWrite))
+		if pct := t.Billed(); pct > 0 {
+			cached += fmt.Sprintf(" · %d%% of billed", 100*t.CacheRead/pct)
+		}
+		written = fmt.Sprintf("%s at last reply", humanCount(s.ContextTokens))
 	}
 	lines := []string{
 		styleTitle.Render(truncate(s.Title, 64)),
@@ -1804,7 +1815,9 @@ func (m Model) viewInspect() string {
 		row("span", humanDuration(dur)),
 		row("messages", fmt.Sprintf("%d user · %d assistant · %d tool calls", s.UserMsgs, s.AsstMsgs, s.ToolCalls)),
 		row("model", orDash(s.Model)),
-		row("tokens", tokens),
+		row("tokens", billed),
+		row("cache", orDash(cached)),
+		row("context", orDash(written)),
 		row("cli version", orDash(s.Version)),
 		row("file", shortPath(s.Path)),
 		row("size", humanSize(s.Size)),

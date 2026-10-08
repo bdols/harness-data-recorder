@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -40,6 +41,8 @@ func main() {
 	replace := flag.String("replace", "", "session `id` to run a literal text substitution over (use with --from and --to); for redacting secrets")
 	from := flag.String("from", "", "text to search for with --replace")
 	allVersions := flag.Bool("all-versions", false, "with --replace, also rewrite every stored backup version (needed for a secret to be truly gone)")
+	tokens := flag.Bool("tokens", false, "report billed token usage per session (biggest first) and exit; optional filter args match project/title/id")
+	byModel := flag.Bool("by-model", false, "with --tokens, break the totals down by issuing model instead of by session")
 	nameWindows := flag.Bool("name-windows", false, "rename each tmux window holding a Claude session after the project running in it, and exit")
 	dryRun := flag.Bool("dry-run", false, "with --name-windows, show what would be renamed without changing anything")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -64,6 +67,11 @@ func main() {
 
 	if *commands {
 		printCommands(*root, *backupDir, flag.Args())
+		return
+	}
+
+	if *tokens {
+		printTokens(*root, *byModel, flag.Args())
 		return
 	}
 
@@ -161,6 +169,129 @@ func exportMarkdown(root, backupDir, id string) error {
 	}
 	fmt.Print(md)
 	return nil
+}
+
+// printTokens reports billed token usage per session, biggest first.
+//
+// The columns stay split rather than totalled because the split is the
+// whole story: cache reads routinely account for the great majority of a
+// session's token volume while costing a fraction of base input, so one
+// combined number says little about either cost or context size. CONTEXT
+// is the size of the last call — not a sum — since every call resends
+// the conversation.
+//
+// Cost estimation is deliberately absent: it needs a per-model price
+// table (base input, output, 5m and 1h cache writes, cache reads) that
+// would silently go stale. ByModel already carries what such an estimate
+// needs, for when it lands behind its own flag.
+func printTokens(root string, byModel bool, terms []string) {
+	sessions, err := session.Scan(root)
+	if err != nil {
+		fatal(err)
+	}
+	if byModel {
+		printTokensByModel(sessions, terms)
+		return
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].Tokens.Billed() > sessions[j].Tokens.Billed()
+	})
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "BILLED\tINPUT\tCACHE W\tCACHE R\tOUTPUT\tTHINKING\tCONTEXT\tPROJECT\t  TITLE")
+	var total session.Tokens
+	shown := 0
+	for _, s := range sessions {
+		if !matchesSession(s, terms) || s.Tokens.Billed() == 0 {
+			continue
+		}
+		shown++
+		total.Add(s.Tokens)
+		t := s.Tokens
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			comma(t.Billed()), comma(t.Input), comma(t.CacheWrite), comma(t.CacheRead),
+			comma(t.Output), comma(t.Thinking), comma(s.ContextTokens),
+			projName(s.CWD), "  "+clip(s.Title, 40))
+	}
+	fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t\t%s\t\n",
+		comma(total.Billed()), comma(total.Input), comma(total.CacheWrite), comma(total.CacheRead),
+		comma(total.Output), comma(total.Thinking), fmt.Sprintf("%d sessions", shown))
+	w.Flush()
+	if b := total.Billed(); b > 0 {
+		fmt.Printf("\ncache reads are %d%% of billed tokens\n", 100*total.CacheRead/b)
+	}
+}
+
+// printTokensByModel aggregates the same totals per issuing model — the
+// granularity a cost estimate needs, since one session commonly spans
+// several models.
+func printTokensByModel(sessions []session.Session, terms []string) {
+	agg := map[string]session.Tokens{}
+	for _, s := range sessions {
+		if !matchesSession(s, terms) {
+			continue
+		}
+		for model, t := range s.ByModel {
+			cur := agg[model]
+			cur.Add(t)
+			agg[model] = cur
+		}
+	}
+	models := make([]string, 0, len(agg))
+	for m := range agg {
+		models = append(models, m)
+	}
+	sort.Slice(models, func(i, j int) bool { return agg[models[i]].Billed() > agg[models[j]].Billed() })
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "BILLED\tINPUT\tCACHE W\tCACHE 1H\tCACHE 5M\tCACHE R\tOUTPUT\tTHINKING\t  MODEL")
+	for _, m := range models {
+		t := agg[m]
+		if t.Billed() == 0 {
+			continue // e.g. <synthetic>, which carries no usage
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			comma(t.Billed()), comma(t.Input), comma(t.CacheWrite), comma(t.CacheWrite1h),
+			comma(t.CacheWrite5m), comma(t.CacheRead), comma(t.Output), comma(t.Thinking), "  "+m)
+	}
+	w.Flush()
+}
+
+// matchesSession reports whether every term appears in the session's
+// project, title or id.
+func matchesSession(s session.Session, terms []string) bool {
+	hay := strings.ToLower(s.CWD + " " + s.Title + " " + s.ID)
+	for _, t := range terms {
+		if !strings.Contains(hay, strings.ToLower(t)) {
+			return false
+		}
+	}
+	return true
+}
+
+// comma formats n with thousands separators. Token counts are compared
+// by magnitude, and "288,296,075" reads at a glance where "288296075"
+// does not.
+func comma(n int) string {
+	if n == 0 {
+		return "-"
+	}
+	s := strconv.Itoa(n)
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// projName is the last path element of a cwd, for a compact column.
+func projName(cwd string) string {
+	cwd = strings.TrimRight(cwd, "/")
+	if cwd == "" {
+		return "-"
+	}
+	return filepath.Base(cwd)
 }
 
 // nameTmuxWindows renames every tmux window holding a Claude session

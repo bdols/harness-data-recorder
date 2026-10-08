@@ -126,6 +126,24 @@ Two rules keep this useful rather than merely tidy:
 
 Renaming turns tmux's `automatic-rename` off for that window, which is what makes the name stick instead of reverting to the running command; `u` / `set-window-option automatic-rename on` reverses it. Re-running is a no-op when everything is already named correctly.
 
+## Token usage
+
+Every assistant message records what the API billed, so csb can total it per session:
+
+```sh
+csb --tokens                 # per session, biggest first, with a grand total
+csb --tokens obsidian        # filter by project, title or id
+csb --tokens --by-model      # same totals split by issuing model
+```
+
+The columns stay **split rather than totalled**, because the split is the whole story. On a real set of 27 sessions here, cache reads were **93% of all billed tokens** (1.42B of 1.51B) — and cache reads cost a fraction of base input. A single "tokens used" figure is dominated by the cheapest component and tells you little about either spend or context size.
+
+`CONTEXT` is a different measurement from the rest: it's the size of the **last** call, not a sum. Every API call resends the whole conversation, so summing `input_tokens` would multiply the same text by the message count. The billed columns are per-call sums (what you were charged); `CONTEXT` is how big the conversation had grown.
+
+The inspect card (`i`) shows the same breakdown for one session, including what share of its billed tokens were cache reads.
+
+Cost estimation is deliberately **not** included: it needs a per-model price table (base input, output, 5m and 1h cache writes, cache reads) that would silently go stale, and sessions routinely span several models. `--by-model` already reports at the granularity such an estimate needs — including the 1h/5m cache-write split, which is billed at different rates — so it can be added behind its own flag without reparsing anything.
+
 ## Re-homing a moved project
 
 Claude Code finds resumable sessions **only** in the directory derived from your *current* working directory: `/var/mnt/videos/Clips` becomes `~/.claude/projects/-var-mnt-videos-Clips`. Move or rename a project and its sessions stay behind under the old name — invisible from the new path, and absent from the resume/agents picker. Worse, if you move a directory out from under a *running* Claude, it notices, `chdir`s to `/tmp`, and every record it writes from then on claims the session lives in `/tmp`.
