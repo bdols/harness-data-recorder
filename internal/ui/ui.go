@@ -115,9 +115,10 @@ type Model struct {
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
 
-	// showTurnTokens annotates each assistant turn in the transcript
-	// reader with what that call billed.
-	showTurnTokens bool
+	// turnTokens selects how each assistant turn in the transcript
+	// reader is annotated with what that call billed: not at all, as a
+	// compact right-margin gauge, or as a full footer line.
+	turnTokens int
 
 	// Token-usage browser state.
 	tokenRows    []tokenRow
@@ -173,9 +174,9 @@ func New(root, backupDir string, autoBackup bool) Model {
 	return Model{root: root, backupDir: backupDir, autoBackup: autoBackup,
 		filter: ti, search: si, cmdFilter: ci,
 		rehomeInput: hi, replaceFrom: rf, replaceTo: rt,
-		replaceAll:     true,
-		showTurnTokens: true,
-		live:           map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
+		replaceAll: true,
+		turnTokens: turnTokensMargin,
+		live:       map[string]live.Session{}, transcripts: map[string][]session.Entry{}}
 }
 
 type scannedMsg struct {
@@ -496,7 +497,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeDetail:
 		switch msg.String() {
 		case "t":
-			m.showTurnTokens = !m.showTurnTokens
+			m.turnTokens = (m.turnTokens + 1) % 3
 			m.setDetailContent()
 			return m, nil
 		case "q", "esc", "h", "left":
@@ -1408,15 +1409,20 @@ func (m *Model) setDetailContent() {
 	}
 	var b strings.Builder
 	for _, e := range entries {
+		var block, gap string
 		switch e.Role {
 		case "user":
-			b.WriteString(styleUser.Render("❯ "+wordwrap.String(e.Text, w-2)) + "\n\n")
+			block, gap = styleUser.Render("❯ "+wordwrap.String(e.Text, w-2)), "\n\n"
 		case "assistant":
-			b.WriteString(styleAsst.Render(wordwrap.String(e.Text, w)) + "\n\n")
+			block, gap = styleAsst.Render(wordwrap.String(e.Text, w)), "\n\n"
 		case "tool":
-			b.WriteString(styleTool.Render("  ⚙ "+truncate(e.Text, w-4)) + "\n")
+			block, gap = styleTool.Render("  ⚙ "+truncate(e.Text, w-4)), "\n"
 		}
-		if m.showTurnTokens {
+		if m.turnTokens == turnTokensMargin {
+			block = hangRight(block, turnTokenGutter(e), w)
+		}
+		b.WriteString(block + gap)
+		if m.turnTokens == turnTokensFull {
 			if note := turnTokenNote(e); note != "" {
 				b.WriteString(note + "\n\n")
 			}
@@ -1933,7 +1939,8 @@ func (m Model) viewDetail() string {
 	s := m.detailOf
 	head := styleTitle.Render(truncate(s.Title, m.width-1)) + "\n" +
 		styleDim.Render(truncate(fmt.Sprintf("%s · %s · %d msgs · %s", shortPath(s.CWD), s.Model, s.UserMsgs+s.AsstMsgs, s.ID), m.width-1))
-	foot := styleStatus.Render("↑/↓ scroll · t tokens · i inspect · e export · enter resume · esc back")
+	foot := styleStatus.Render(fmt.Sprintf("↑/↓ scroll · t tokens (%s) · i inspect · e export · enter resume · esc back",
+		turnTokenMode(m.turnTokens)))
 	return head + "\n" + m.detail.View() + "\n" + foot
 }
 
@@ -1967,6 +1974,86 @@ func (m Model) liveCell(id string, w int) string {
 	}
 	_, style := liveMarker(ls.Status)
 	return style.Render(fmt.Sprintf("%-*s", w, truncate(label, w)))
+}
+
+// Transcript token annotation modes, cycled by "t".
+const (
+	turnTokensOff = iota
+	turnTokensMargin
+	turnTokensFull
+)
+
+func turnTokenMode(mode int) string {
+	switch mode {
+	case turnTokensMargin:
+		return "margin"
+	case turnTokensFull:
+		return "full"
+	}
+	return "off"
+}
+
+// turnBar sizes one turn's context against the shape of a typical
+// conversation, which is a different scale from a whole session's
+// billed total (tens of thousands against tens of millions), so it
+// carries its own ramp rather than reusing tokenRamp.
+var turnRamp = []struct {
+	upTo  int
+	glyph string
+}{
+	{10_000, "▁"},
+	{25_000, "▂"},
+	{50_000, "▃"},
+	{100_000, "▄"},
+	{150_000, "▅"},
+	{200_000, "▆"},
+	{400_000, "▇"},
+}
+
+func turnBar(context int) string {
+	for _, step := range turnRamp {
+		if context < step.upTo {
+			return step.glyph
+		}
+	}
+	return "█"
+}
+
+// turnTokenGutter renders one turn's cost compactly enough to live in
+// the right margin: a bar for how much context the call carried, the
+// figure itself, and the output it produced. A turn that rebuilt an
+// expired cache is marked with ⟳ — shape, not colour, so it survives
+// both a mono terminal and red-green colour blindness.
+func turnTokenGutter(e session.Entry) string {
+	if e.Context == 0 && e.Tokens.Output == 0 {
+		return ""
+	}
+	g := fmt.Sprintf("%s %s ↓%s", turnBar(e.Context), humanCount(e.Context), humanCount(e.Tokens.Output))
+	if e.Recached() {
+		return styleDim.Render(g) + styleStatus.Render(" ⟳")
+	}
+	return styleDim.Render(g) + "  "
+}
+
+// hangRight places gutter against the right edge of width w, on the
+// last line of an already-rendered block when it fits there, and on a
+// line of its own when it does not. Measuring the rendered line keeps
+// ANSI styling out of the arithmetic.
+func hangRight(block, gutter string, w int) string {
+	if gutter == "" {
+		return block
+	}
+	gw := lipgloss.Width(gutter)
+	if gw+2 > w {
+		return block
+	}
+	lines := strings.Split(block, "\n")
+	last := lines[len(lines)-1]
+	if pad := w - gw - lipgloss.Width(last); pad >= 2 {
+		lines[len(lines)-1] = last + strings.Repeat(" ", pad) + gutter
+		return strings.Join(lines, "\n")
+	}
+	return block + "\n" + strings.Repeat(" ", w-gw) + gutter
 }
 
 // turnTokenNote renders what one assistant turn billed, as a dim footer

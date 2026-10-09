@@ -142,7 +142,20 @@ Usage is counted **once per API response, not once per record**. Claude Code wri
 
 `CONTEXT` is a different measurement from the rest: it's the size of the **last** call, not a sum. Every API call resends the whole conversation, so summing `input_tokens` would multiply the same text by the message count. The billed columns are per-call sums (what you were charged); `CONTEXT` is how big the conversation had grown.
 
-Opening a transcript (`v`) annotates each assistant turn with what that call billed — `↑ 45.2k ctx · ↓ 1.2k out` — and flags the turns that **rebuilt an expired cache**: `⟳ cache rebuilt, 382.6k re-sent`. Caching is normally incremental (a median of ~900 tokens per turn on a real session) until the TTL lapses and the whole conversation must be re-sent, which lands as a p99 of ~380,000. About 3–4% of turns on real sessions, and they are where the cost actually is. `t` toggles the annotations.
+Opening a transcript (`v`) annotates each assistant turn with what that call billed, and flags the turns that **rebuilt an expired cache**. Caching is normally incremental (a median of ~900 tokens per turn on a real session) until the TTL lapses and the whole conversation must be re-sent, which lands as a p99 of ~380,000. About 3–4% of turns on real sessions, and they are where the cost actually is.
+
+`t` cycles three ways. The default hangs a compact gauge in the **right margin**, flush to the edge and out of the way of reading:
+
+```
+  ⚙ Bash: Find investing-related notes in vault
+  ⚙ Bash: Search vault for finance/trading notes                      ▂ 23.1k ↓348
+  ⚙ Read: /var/home/bd/obsidian/fin investing/stock trading.md
+  ⚙ Read: /var/home/bd/obsidian/fin investing/Finance MOC.md          ▅ 126.1k ↓276  ⟳
+```
+
+The bar sizes the context the call carried — a separate ramp from the list's, since one turn spans tens of thousands of tokens where a whole session spans tens of millions — and `⟳` marks a cache rebuild. Press `t` again for the full footer form, `↑ 45.2k ctx · ↓ 1.2k out` plus `⟳ cache rebuilt, 382.6k re-sent`, which also breaks out thinking tokens; once more turns the annotations off. The footer names the current mode.
+
+The gauge attaches to the **last** line of a turn, so a response that made several tool calls in parallel carries one figure, not one per call.
 
 Context is shown rather than raw input because `input_tokens` alone misleads: on a cached conversation it is a handful of tokens while the call actually carried the entire history.
 

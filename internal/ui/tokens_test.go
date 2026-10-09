@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bdols/claude-session-browser/internal/session"
 )
 
@@ -121,5 +123,76 @@ func TestPctGuardsZero(t *testing.T) {
 	}
 	if got := pct(1, 4); got != 25 {
 		t.Errorf("pct(1,4) = %d, want 25", got)
+	}
+}
+
+func TestTurnBarRamp(t *testing.T) {
+	// upTo is exclusive, so a boundary value belongs to the step above.
+	cases := []struct {
+		context int
+		want    string
+	}{
+		{0, "▁"}, {9_999, "▁"},
+		{10_000, "▂"}, {24_999, "▂"},
+		{25_000, "▃"},
+		{50_000, "▄"},
+		{100_000, "▅"},
+		{150_000, "▆"},
+		{200_000, "▇"},
+		{400_000, "█"}, {2_000_000, "█"},
+	}
+	for _, c := range cases {
+		if got := turnBar(c.context); got != c.want {
+			t.Errorf("turnBar(%d) = %q, want %q", c.context, got, c.want)
+		}
+	}
+}
+
+func TestTurnTokenGutterBlankWithoutUsage(t *testing.T) {
+	if g := turnTokenGutter(session.Entry{Role: "tool", Text: "ls"}); g != "" {
+		t.Errorf("gutter for an unbilled entry = %q, want empty", g)
+	}
+}
+
+func TestTurnTokenGutterMarksRebuild(t *testing.T) {
+	e := session.Entry{Context: 40_000, Tokens: session.Tokens{Output: 120, CacheWrite: 30_000}}
+	g := turnTokenGutter(e)
+	if !strings.Contains(g, "⟳") {
+		t.Errorf("a turn that rebuilt its cache should be marked: %q", g)
+	}
+	if !strings.Contains(g, "40.0k") || !strings.Contains(g, "↓120") {
+		t.Errorf("gutter should carry context and output: %q", g)
+	}
+}
+
+// The gutter has to sit flush against the right edge whether or not it
+// shares a line with the text, and the padding has to be computed from
+// the rendered width so ANSI escapes don't push it off the edge.
+func TestHangRightAlignsToWidth(t *testing.T) {
+	gutter := turnTokenGutter(session.Entry{Context: 20_000, Tokens: session.Tokens{Output: 357}})
+	for _, block := range []string{
+		styleTool.Render("  ⚙ Bash: short"),
+		styleAsst.Render("a line long enough that the gutter cannot share it, by quite some margin indeed"),
+	} {
+		out := hangRight(block, gutter, 80)
+		lines := strings.Split(out, "\n")
+		last := lines[len(lines)-1]
+		if w := lipgloss.Width(last); w != 80 {
+			t.Errorf("last line width = %d, want 80: %q", w, last)
+		}
+		if !strings.Contains(last, "↓357") {
+			t.Errorf("gutter missing from last line: %q", last)
+		}
+	}
+}
+
+func TestHangRightKeepsBlockWhenTooNarrow(t *testing.T) {
+	gutter := turnTokenGutter(session.Entry{Context: 20_000, Tokens: session.Tokens{Output: 357}})
+	block := styleAsst.Render("hello")
+	if out := hangRight(block, gutter, 8); out != block {
+		t.Errorf("a window too narrow for the gutter should render unchanged, got %q", out)
+	}
+	if out := hangRight(block, "", 80); out != block {
+		t.Errorf("an empty gutter should render unchanged, got %q", out)
 	}
 }

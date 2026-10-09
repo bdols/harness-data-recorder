@@ -328,17 +328,21 @@ send v
 # Barrier on the detail view's own footer: the split-pane preview already
 # shows the transcript text, so waiting on that passes while still in the
 # list.
-wait_for "t tokens" 5
+wait_for "t tokens (margin)" 5
 # Alpha's assistant turn: 10 input + 100 cache read = 110 ctx, 5 output.
-assert_present "transcript annotates the turn's context" "110 ctx"
-assert_present "transcript annotates the turn's output" "5 out"
-send t
-wait_absent "110 ctx" 5
-assert_absent "t hides the per-turn tokens" "110 ctx"
-assert_present "transcript text survives the toggle" "searching for needle"
+assert_present "transcript hangs the turn's tokens in the margin" "110 ↓5"
+assert_absent "margin mode leaves out the footer form" "110 ctx"
 send t
 wait_for "110 ctx" 5
-assert_present "t shows them again" "110 ctx"
+assert_present "t expands to the full annotation" "110 ctx"
+assert_present "the full annotation names the output" "5 out"
+send t
+wait_absent "110 ctx" 5
+assert_absent "t then hides the per-turn tokens" "110 ctx"
+assert_present "transcript text survives the cycle" "searching for needle"
+send t
+wait_for "t tokens (margin)" 5
+assert_present "t cycles back to the margin" "110 ↓5"
 send Escape
 
 echo "usage view (u)"
