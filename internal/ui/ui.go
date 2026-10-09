@@ -115,6 +115,12 @@ type Model struct {
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
 
+	// detailAnchors is the first content line of each transcript entry
+	// in the last render, and detailPath the transcript it describes.
+	// Together they let a re-render hold its place on screen.
+	detailAnchors []int
+	detailPath    string
+
 	// turnTokens selects how each assistant turn in the transcript
 	// reader is annotated with what that call billed: not at all, as a
 	// compact right-margin gauge, or as a full footer line.
@@ -505,6 +511,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.detailBack = modeList
 			m.mode = back
 			m.detailOf = nil
+			// Leaving drops the anchor, so re-opening a transcript starts
+			// at the top rather than wherever it was last read.
+			m.detailPath, m.detailAnchors = "", nil
 			return m, nil
 		case "i":
 			m.mode = modeInspect
@@ -1407,8 +1416,19 @@ func (m *Model) setDetailContent() {
 	if w < 20 {
 		w = 78
 	}
+	// Re-rendering (toggling annotations, resizing) must not throw the
+	// reader back to the top, so note where the entry nearest the middle
+	// of the screen sits and put it back on the same row afterwards.
+	anchor, row := m.anchorEntry()
+	if m.detailPath != s.Path {
+		anchor = -1
+	}
+
 	var b strings.Builder
+	lines := 0
+	anchors := make([]int, 0, len(entries))
 	for _, e := range entries {
+		anchors = append(anchors, lines)
 		var block, gap string
 		switch e.Role {
 		case "user":
@@ -1421,15 +1441,42 @@ func (m *Model) setDetailContent() {
 		if m.turnTokens == turnTokensMargin {
 			block = hangRight(block, turnTokenGutter(e), w)
 		}
-		b.WriteString(block + gap)
+		chunk := block + gap
 		if m.turnTokens == turnTokensFull {
 			if note := turnTokenNote(e); note != "" {
-				b.WriteString(note + "\n\n")
+				chunk += note + "\n\n"
 			}
 		}
+		b.WriteString(chunk)
+		lines += strings.Count(chunk, "\n")
 	}
 	m.detail.SetContent(b.String())
-	m.detail.GotoTop()
+	m.detailAnchors, m.detailPath = anchors, s.Path
+	if anchor >= 0 && anchor < len(anchors) {
+		m.detail.SetYOffset(anchors[anchor] - row)
+	} else {
+		m.detail.GotoTop()
+	}
+}
+
+// anchorEntry picks the transcript entry nearest the middle of the
+// viewport and reports its index along with the screen row it starts
+// on, which is negative when the entry begins above the fold. Lines
+// are a fair unit here only because the content is pre-wrapped to
+// narrower than the viewport, so nothing soft-wraps underneath us.
+func (m Model) anchorEntry() (int, int) {
+	if len(m.detailAnchors) == 0 {
+		return -1, 0
+	}
+	mid := m.detail.YOffset + m.detail.Height/2
+	idx := 0
+	for i, line := range m.detailAnchors {
+		if line > mid {
+			break
+		}
+		idx = i
+	}
+	return idx, m.detailAnchors[idx] - m.detail.YOffset
 }
 
 func (m Model) View() string {

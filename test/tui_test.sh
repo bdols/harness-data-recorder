@@ -345,6 +345,49 @@ wait_for "t tokens (margin)" 5
 assert_present "t cycles back to the margin" "110 ↓5"
 send Escape
 
+echo "scroll position survives the t cycle"
+# Needs a transcript long enough to scroll, in its own root so the
+# fixtures the rest of the suite counts on stay as they are.
+LONGROOT="$WORK/longroot"
+mkdir -p "$LONGROOT/-proj-long"
+: >"$LONGROOT/-proj-long/sess-long.jsonl"
+echo '{"type":"ai-title","aiTitle":"Long Session","sessionId":"sess-long"}' >>"$LONGROOT/-proj-long/sess-long.jsonl"
+i=0
+while [ $i -lt 60 ]; do
+	printf '{"type":"user","message":{"role":"user","content":"prompt marker-%03d"},"timestamp":"2026-10-01T12:00:00Z","cwd":"/proj/long"}\n' "$i" \
+		>>"$LONGROOT/-proj-long/sess-long.jsonl"
+	printf '{"type":"assistant","message":{"id":"msg_%03d","role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"answer marker-%03d"}],"usage":{"input_tokens":10,"output_tokens":120,"cache_read_input_tokens":20000}},"timestamp":"2026-10-01T12:00:01Z"}\n' "$i" "$i" \
+		>>"$LONGROOT/-proj-long/sess-long.jsonl"
+	i=$((i + 1))
+done
+"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
+"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
+	"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LONGROOT --backup-dir $WORK/empty-backups --no-auto-backup"
+wait_for "Long Session" 8 || echo "  (warning: list never appeared)"
+send v
+wait_for "t tokens (margin)" 5
+# Page into the middle, then note a marker that is actually on screen.
+send PageDown PageDown PageDown
+sleep 0.5
+MARK=$(pane | grep -o 'marker-[0-9][0-9][0-9]' | sed -n 5p)
+if [ -z "$MARK" ]; then
+	bad "no marker visible after scrolling"
+	MARK="marker-000"
+fi
+for mode in full off margin; do
+	send t
+	wait_for "t tokens ($mode)" 5
+	assert_present "$MARK still on screen in $mode mode" "$MARK"
+done
+send Escape
+wait_for "MODIFIED" 5
+# Re-opening is a fresh read, so it starts at the top again.
+send v
+wait_for "t tokens (margin)" 5
+assert_present "re-opening a transcript starts at the top" "marker-000"
+send Escape
+rm -rf "$LONGROOT"
+
 echo "usage view (u)"
 launch
 send u

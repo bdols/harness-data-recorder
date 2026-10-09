@@ -157,6 +157,8 @@ The bar sizes the context the call carried — a separate ramp from the list's, 
 
 The gauge attaches to the **last** line of a turn, so a response that made several tool calls in parallel carries one figure, not one per call.
 
+Cycling modes **holds your place**: the entry nearest the middle of the screen is put back on the same row, rather than the reader jumping to the top every time the line count changes. Resizing the window keeps its place the same way. Leaving the reader drops the anchor, so re-opening a transcript starts at the top.
+
 Context is shown rather than raw input because `input_tokens` alone misleads: on a cached conversation it is a handful of tokens while the call actually carried the entire history.
 
 Press **`u`** for the usage view: every visible session as a table — billed, input, cache writes, cache reads, output, uncached % — biggest first, with a total line. `m` toggles between per-session and per-model aggregation, `enter` opens the session's transcript, `esc` returns. It respects the list filter, so `/obsidian` then `u` scopes the numbers to that project. The inspect card (`i`) shows the same breakdown for a single session.
