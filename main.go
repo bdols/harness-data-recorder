@@ -96,11 +96,15 @@ func main() {
 
 	if *restore != "" {
 		versions := backup.Versions(*backupDir, *restore)
-		dst, err := backup.Restore(*backupDir, *root, *restore)
+		before := backup.Records(transcriptPath(*root, "", *restore))
+		dst, err := backup.Restore(*backupDir, *root, *restore, *force)
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Println("restored", dst)
+		fmt.Printf("restored %s (%d records)\n", dst, backup.Records(dst))
+		if before > 0 {
+			fmt.Printf("(replaced a live file of %d records, kept as a version)\n", before)
+		}
 		if len(versions) > 1 {
 			fmt.Printf("(chose the most complete of %d stored versions)\n", len(versions))
 		}

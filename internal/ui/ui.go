@@ -473,9 +473,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// if any, is captured first inside RestoreVersion).
 				dst, err = backup.RestoreVersion(m.restoreDir(), session.DefaultRoot(), s.ProjectDir, s.ID, m.pendingVersion)
 			} else {
-				// Default: most complete version. Restore refuses to
-				// overwrite a live file, so the destination is clear.
-				dst, err = backup.Restore(m.restoreDir(), session.DefaultRoot(), s.ID)
+				// Default: most complete version. This dialog only opens
+				// for a session with no live transcript, so there is
+				// nothing to overwrite and no need to force.
+				dst, err = backup.Restore(m.restoreDir(), session.DefaultRoot(), s.ID, false)
 			}
 			if err != nil {
 				m.mode = modeList
@@ -1224,7 +1225,7 @@ func (m *Model) openVersions(s *session.Session) {
 		v := vs[i]
 		rows = append(rows, versionRow{
 			Version: v,
-			records: countRecords(v.Path),
+			records: backup.Records(v.Path),
 			live:    liveID != "" && backup.VersionID(v.Path) == liveID,
 		})
 	}
@@ -1371,16 +1372,6 @@ func slugify(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
-}
-
-// countRecords returns the number of newline-delimited records in a
-// session file, a cheap proxy for how much it contains.
-func countRecords(path string) int {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	return strings.Count(string(b), "\n")
 }
 
 // switchTmux jumps the attached tmux client to the pane running the
@@ -1930,7 +1921,7 @@ func (m Model) viewConfirmRestore() string {
 			row("session", s.ID),
 			row("project", shortPath(s.CWD)),
 			row("version", fmt.Sprintf("%s · %s · %d records",
-				ver.Time.Local().Format("2006-01-02 15:04:05"), humanSize(ver.Size), countRecords(ver.Path))),
+				ver.Time.Local().Format("2006-01-02 15:04:05"), humanSize(ver.Size), backup.Records(ver.Path))),
 			row("resume", shortPath(livePath(s))),
 			"",
 			styleStatus.Render("y  restore & resume    ·    any other key  cancel"),

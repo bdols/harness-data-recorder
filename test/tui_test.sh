@@ -538,6 +538,43 @@ send q
 kill "$K1" "$K2" 2>/dev/null
 rm -rf "$RHOME" "$WORK/rsessions"
 
+echo "restoring over a husk (--restore --force)"
+# A session emptied down to metadata records is the case where the live
+# file is the worse copy: restore must refuse by default and replace it
+# with --force, keeping the husk as a version.
+HROOT="$WORK/hroot"; HBK="$WORK/hbk"
+rm -rf "$HROOT" "$HBK"
+mkdir -p "$HROOT/-proj"
+printf '{"type":"user","message":{"role":"user","content":"real work"},"timestamp":"2026-10-01T12:00:00Z","cwd":"/proj"}\n{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-10-01T12:00:01Z"}\n' \
+	>"$HROOT/-proj/husked.jsonl"
+"$CSB" --root "$HROOT" --backup-dir "$HBK" --backup >/dev/null
+printf '{"type":"ai-title","aiTitle":"husk","sessionId":"husked"}\n' >"$HROOT/-proj/husked.jsonl"
+
+if OUT=$("$CSB" --root "$HROOT" --backup-dir "$HBK" --restore husked 2>&1); then
+	bad "--restore clobbered a live file without --force"
+else
+	case "$OUT" in
+	*"--force"*) ok "--restore explains how to replace a husk" ;;
+	*) bad "--restore error does not mention --force: $OUT" ;;
+	esac
+fi
+case "$OUT" in
+*"1 records"*|*"2 records"*) ok "--restore error compares live and backup records" ;;
+*) bad "--restore error does not compare record counts: $OUT" ;;
+esac
+
+"$CSB" --root "$HROOT" --backup-dir "$HBK" --restore husked --force >/dev/null 2>&1
+if [ "$(wc -l <"$HROOT/-proj/husked.jsonl")" = 2 ]; then
+	ok "--force restored the full transcript"
+else
+	bad "--force did not restore the full transcript"
+fi
+if grep -ql "aiTitle" "$HBK/-proj/husked.versions/"*.jsonl 2>/dev/null; then
+	ok "the replaced husk was kept as a version"
+else
+	bad "the replaced husk was not kept as a version"
+fi
+
 echo "re-home a moved project (--rehome)"
 # A session recorded under an old path, whose project has since moved.
 RH="$WORK/rh"

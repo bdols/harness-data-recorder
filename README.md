@@ -91,6 +91,20 @@ Every occurrence is underlined and the current one is in reverse video — **wei
 
 After a **deep** search the reader can still only walk what it draws, so the counts diverge: the footer says `"sess-alpha" is in the file, not in the shown text` rather than leaving you pressing `n` at nothing. After a content search the two counts agree by construction, with one exception — a tool-call line is truncated to the window width, so a hit past the cut is counted by the list and not by the reader.
 
+### When the live file is the worse copy
+
+A session can be left a **husk** — the metadata records (`ai-title`, `mode`, `agent-name`, `cost-state`) and no conversation at all. Resuming it opens an empty session, and because the file exists, nothing flags it as lost. This happened to a forked session here: 227 records on Sep 9, a 773-byte husk by Oct 10.
+
+`csb --restore <id>` refuses to overwrite a live file by default — the backup is the past and the live file is the present, so clobbering it blind is the wrong default. But it now says which copy is actually fuller, so a husk is obvious:
+
+```
+error: session b4b99c60-… already exists at ~/.claude/projects/-var-home-bd-obsidian/b4b99c60-….jsonl
+       (live 773 B, 6 records; backup 434.6 KiB, 227 records) — pass --force to replace it,
+       keeping the live copy as a version
+```
+
+`--force` then replaces it, and the file being replaced is captured as a version first, so the swap is itself reversible. In the TUI, `V` shows every stored version with the most complete flagged `★`, and `enter` restores the one you pick.
+
 ## Exporting to Markdown
 
 Press `e` to export a session's transcript to a readable Markdown file (title, id, project, model, date range, then each user/assistant turn). It's written to the current directory. In the version browser, `e` exports the specific version you've selected — so you can export an older, more complete state.

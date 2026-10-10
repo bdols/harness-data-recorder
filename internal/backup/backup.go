@@ -20,6 +20,7 @@
 package backup
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -200,7 +201,17 @@ func updateCurrent(flat, vdir string) error {
 // the given ID back into root so `claude --resume` finds it again.
 // Defaulting to the largest version means a later truncation can't mask
 // the good copy. It refuses to overwrite a live session file.
-func Restore(dest, root, id string) (string, error) {
+// Restore copies a backed-up session's most complete version into the
+// projects dir. A live transcript at the destination normally stops it:
+// the backup is a copy of the past and the live file is the present, so
+// clobbering it blind would be the wrong default.
+//
+// But the live file is not always the fuller one. A session can be left
+// a husk — metadata records and no conversation — in which case the
+// backup is the only real copy and replacing it is exactly the point.
+// force allows that, routed through RestoreVersion so the file being
+// replaced is itself captured as a version first.
+func Restore(dest, root, id string, force bool) (string, error) {
 	dirs, err := os.ReadDir(dest)
 	if err != nil {
 		return "", err
@@ -222,8 +233,14 @@ func Restore(dest, root, id string) (string, error) {
 			best = flat
 		}
 		dst := filepath.Join(root, d.Name(), name)
-		if _, err := os.Stat(dst); err == nil {
-			return "", fmt.Errorf("session %s already exists at %s", id, dst)
+		if live, err := os.Stat(dst); err == nil {
+			if !force {
+				return "", fmt.Errorf("session %s already exists at %s (live %s, %d records; backup %s, %d records) — pass --force to replace it, keeping the live copy as a version",
+					id, dst,
+					humanBytes(live.Size()), Records(dst),
+					humanBytes(sizeOf(best)), Records(best))
+			}
+			return RestoreVersion(dest, root, d.Name(), id, best)
 		}
 		if err := copyPreserving(best, dst); err != nil {
 			return "", err
@@ -254,6 +271,36 @@ func RestoreVersion(dest, root, projectDir, id, versionPath string) (string, err
 		return "", err
 	}
 	return liveDst, nil
+}
+
+// Records counts the newline-delimited records in a session file, a
+// cheap proxy for how much it holds — and the number that matters when
+// deciding whether a live file or a backup is the fuller copy.
+func Records(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return bytes.Count(b, []byte("\n"))
+}
+
+func sizeOf(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // MatchLive returns the path of the version whose content matches the

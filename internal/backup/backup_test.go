@@ -168,7 +168,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored, err := Restore(dest, root, "abc123")
+	restored, err := Restore(dest, root, "abc123", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestTruncationKeepsRecoverableVersion(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := Restore(dest, root, "sid")
+	restored, err := Restore(dest, root, "sid", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestSyncMigratesLegacyFlatBackup(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "-proj", "sid.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := Restore(dest, root, "sid")
+	restored, err := Restore(dest, root, "sid", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,14 +363,74 @@ func TestRestoreRefusesOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The live file still exists; restore must refuse.
-	if _, err := Restore(dest, root, "abc123"); err == nil {
+	if _, err := Restore(dest, root, "abc123", false); err == nil {
 		t.Fatal("Restore overwrote a live session; want error")
+	}
+}
+
+// A session left as a husk — metadata records and no conversation — is
+// the case where the live file is the *worse* copy. force replaces it,
+// and the husk itself becomes a version so the replacement is
+// reversible.
+func TestRestoreForceReplacesAHusk(t *testing.T) {
+	root, dest := t.TempDir(), t.TempDir()
+	proj := "-home-test-proj"
+	if err := os.MkdirAll(filepath.Join(root, proj), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(root, proj, "abc123.jsonl")
+	full := "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n{\"type\":\"user\"}\n"
+	if err := os.WriteFile(live, []byte(full), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Sync(root, dest); err != nil {
+		t.Fatal(err)
+	}
+	// The session is then emptied down to a single metadata record.
+	husk := "{\"type\":\"ai-title\"}\n"
+	if err := os.WriteFile(live, []byte(husk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Restore(dest, root, "abc123", false); err == nil {
+		t.Fatal("restore without force overwrote the live file; want error")
+	}
+	dst, err := Restore(dest, root, "abc123", true)
+	if err != nil {
+		t.Fatalf("forced restore failed: %v", err)
+	}
+	if got := Records(dst); got != 3 {
+		t.Errorf("restored %d records, want the full 3", got)
+	}
+	// The husk must still be reachable, or the restore was one-way.
+	found := false
+	for _, v := range Versions(dest, "abc123") {
+		if Records(v.Path) == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the replaced husk was not kept as a version")
+	}
+}
+
+func TestRecordsCountsLines(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.jsonl")
+	if err := os.WriteFile(p, []byte("a\nb\nc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Records(p); got != 3 {
+		t.Errorf("Records = %d, want 3", got)
+	}
+	if got := Records(filepath.Join(dir, "missing.jsonl")); got != 0 {
+		t.Errorf("Records of a missing file = %d, want 0", got)
 	}
 }
 
 func TestRestoreMissing(t *testing.T) {
 	root, dest := t.TempDir(), t.TempDir()
-	if _, err := Restore(dest, root, "nope"); err == nil {
+	if _, err := Restore(dest, root, "nope", false); err == nil {
 		t.Fatal("Restore of unknown id succeeded; want error")
 	}
 }
