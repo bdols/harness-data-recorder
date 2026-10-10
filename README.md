@@ -46,7 +46,7 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `t` / `T` | name the selected session's tmux window after its project / name all of them (`u` in the running view undoes it) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
-| `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears |
+| `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears. Opening a result jumps to the first occurrence; `n`/`N` walk the rest |
 | `b` | back up sessions now |
 | `m` | re-home the session into another directory (for a project that moved on disk) |
 | `x` | find & replace literal text in the session — redacting a pasted secret, or fixing a stale path |
@@ -73,6 +73,14 @@ Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.
 Claude Code cleans up a session's `.jsonl` after `cleanupPeriodDays`, but a **long-running process still holds the transcript in memory** — sending it any message rewrites the file. So a months-old running session whose file was reaped isn't lost, just invisible: no file means it never appears in the list, and if the process dies the transcript is gone for good.
 
 `R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `csb --running` prints the same list for scripting.
+
+### Walking the search hits
+
+A content search (`s`) carries into the reader. Opening a result lands on the **first occurrence** rather than the top of the transcript, `n` and `N` walk forwards and backwards through the rest (wrapping at either end), and the footer keeps count: `hit 7/69 (n/N)`. Each hit is centred rather than pinned to an edge, so the surrounding turn is readable.
+
+Every occurrence is underlined and the current one is in reverse video — **weight and inversion, not hue**, so the marker survives any palette and reads the same under colour blindness. Occurrences, not lines, are the unit: two hits on one line are two stops.
+
+The reader's count can be **lower than the list's**. The list greps the raw `.jsonl`, which also holds metadata, tool arguments and JSON escaping; the reader counts what is actually on screen. When a session matches only in the parts the reader doesn't show, the footer says so rather than leaving you pressing `n` at nothing: `"sess-alpha" not in the shown text`.
 
 ## Exporting to Markdown
 

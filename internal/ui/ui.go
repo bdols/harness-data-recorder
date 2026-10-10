@@ -51,6 +51,12 @@ var (
 	styleTool     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "243"})
 	styleError    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
 	styleStatus   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "246"})
+	// Search hits are marked by weight and reverse video rather than
+	// hue, so they read the same on any palette and under colour
+	// blindness: every occurrence is underlined, the current one is
+	// reversed.
+	styleHit    = lipgloss.NewStyle().Bold(true).Underline(true)
+	styleHitCur = lipgloss.NewStyle().Bold(true).Reverse(true)
 )
 
 // keyBar lists the modeList bindings. It lives on its own line so
@@ -114,6 +120,14 @@ type Model struct {
 	commandCursor int
 	cmdFilter     textinput.Model
 	cmdFiltering  bool
+
+	// detailHits is the rendered line of each occurrence of
+	// contentQuery in the open transcript, in reading order;
+	// hitCursor is the one being visited and hitJump asks the next
+	// render to scroll to it rather than hold its place.
+	detailHits []int
+	hitCursor  int
+	hitJump    bool
 
 	// detailAnchors is the first content line of each transcript entry
 	// in the last render, and detailPath the transcript it describes.
@@ -502,6 +516,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modeDetail:
 		switch msg.String() {
+		case "n", "N":
+			if len(m.detailHits) == 0 {
+				return m, nil
+			}
+			if msg.String() == "n" {
+				m.hitCursor = (m.hitCursor + 1) % len(m.detailHits)
+			} else {
+				m.hitCursor = (m.hitCursor - 1 + len(m.detailHits)) % len(m.detailHits)
+			}
+			m.hitJump = true
+			m.setDetailContent()
+			return m, nil
 		case "t":
 			m.turnTokens = (m.turnTokens + 1) % 3
 			m.setDetailContent()
@@ -514,6 +540,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Leaving drops the anchor, so re-opening a transcript starts
 			// at the top rather than wherever it was last read.
 			m.detailPath, m.detailAnchors = "", nil
+			m.detailHits, m.hitCursor, m.hitJump = nil, 0, false
 			return m, nil
 		case "i":
 			m.mode = modeInspect
@@ -1421,22 +1448,27 @@ func (m *Model) setDetailContent() {
 	// of the screen sits and put it back on the same row afterwards.
 	anchor, row := m.anchorEntry()
 	if m.detailPath != s.Path {
-		anchor = -1
+		// A different transcript: nothing to hold on to, and while a
+		// content search is live, opening one is a question about where
+		// something is — so land on the first occurrence, not the top.
+		anchor, m.hitCursor = -1, 0
+		m.hitJump = m.contentQuery != ""
 	}
 
 	var b strings.Builder
 	lines := 0
 	anchors := make([]int, 0, len(entries))
+	hits := hitPainter{query: strings.ToLower(m.contentQuery), cur: m.hitCursor}
 	for _, e := range entries {
 		anchors = append(anchors, lines)
 		var block, gap string
 		switch e.Role {
 		case "user":
-			block, gap = styleUser.Render("❯ "+wordwrap.String(e.Text, w-2)), "\n\n"
+			block, gap = hits.paint("❯ "+wordwrap.String(e.Text, w-2), styleUser, lines), "\n\n"
 		case "assistant":
-			block, gap = styleAsst.Render(wordwrap.String(e.Text, w)), "\n\n"
+			block, gap = hits.paint(wordwrap.String(e.Text, w), styleAsst, lines), "\n\n"
 		case "tool":
-			block, gap = styleTool.Render("  ⚙ "+truncate(e.Text, w-4)), "\n"
+			block, gap = hits.paint("  ⚙ "+truncate(e.Text, w-4), styleTool, lines), "\n"
 		}
 		if m.turnTokens == turnTokensMargin {
 			block = hangRight(block, turnTokenGutter(e), w)
@@ -1451,12 +1483,80 @@ func (m *Model) setDetailContent() {
 		lines += strings.Count(chunk, "\n")
 	}
 	m.detail.SetContent(b.String())
-	m.detailAnchors, m.detailPath = anchors, s.Path
-	if anchor >= 0 && anchor < len(anchors) {
+	m.detailAnchors, m.detailPath, m.detailHits = anchors, s.Path, hits.lines
+	if m.hitCursor >= len(hits.lines) {
+		m.hitCursor = 0
+	}
+	switch {
+	case m.hitJump && len(hits.lines) > 0:
+		// Centre the occurrence: a hit pinned to the top or bottom edge
+		// loses the context that makes it readable.
+		m.detail.SetYOffset(hits.lines[m.hitCursor] - m.detail.Height/2)
+	case anchor >= 0 && anchor < len(anchors):
 		m.detail.SetYOffset(anchors[anchor] - row)
-	} else {
+	default:
 		m.detail.GotoTop()
 	}
+	m.hitJump = false
+}
+
+// hitPainter styles transcript text, picking out occurrences of the
+// content-search query as it goes and recording the rendered line each
+// one landed on, in reading order, so the reader can walk them.
+//
+// Each line is styled in segments rather than as a whole, because a
+// highlight nested inside an already-rendered string would terminate
+// the surrounding style and strip the colour from the rest of the line.
+type hitPainter struct {
+	query string // lower-cased; empty disables highlighting
+	cur   int    // index of the occurrence to mark as current
+	lines []int  // rendered line of each occurrence found so far
+}
+
+// paint renders text with base, highlighting any occurrences of the
+// query. first is the rendered line number text starts on, which is
+// what makes the recorded positions comparable with the viewport's
+// offset.
+func (p *hitPainter) paint(text string, base lipgloss.Style, first int) string {
+	if p.query == "" {
+		return base.Render(text)
+	}
+	out := strings.Split(text, "\n")
+	for i, line := range out {
+		lower := strings.ToLower(line)
+		if len(lower) != len(line) {
+			// Lower-casing changed the byte length (a handful of
+			// non-ASCII runes do), so offsets into one string no longer
+			// index the other. Leave the line unhighlighted rather than
+			// slice it wrongly.
+			out[i] = base.Render(line)
+			continue
+		}
+		var b strings.Builder
+		rest := line
+		found := false
+		for {
+			at := strings.Index(lower, p.query)
+			if at < 0 {
+				break
+			}
+			hit := styleHit
+			if len(p.lines) == p.cur {
+				hit = styleHitCur
+			}
+			p.lines = append(p.lines, first+i)
+			b.WriteString(base.Render(rest[:at]))
+			b.WriteString(hit.Render(rest[at : at+len(p.query)]))
+			rest, lower = rest[at+len(p.query):], lower[at+len(p.query):]
+			found = true
+		}
+		if !found {
+			out[i] = base.Render(line)
+			continue
+		}
+		out[i] = b.String() + base.Render(rest)
+	}
+	return strings.Join(out, "\n")
 }
 
 // anchorEntry picks the transcript entry nearest the middle of the
@@ -1986,9 +2086,27 @@ func (m Model) viewDetail() string {
 	s := m.detailOf
 	head := styleTitle.Render(truncate(s.Title, m.width-1)) + "\n" +
 		styleDim.Render(truncate(fmt.Sprintf("%s · %s · %d msgs · %s", shortPath(s.CWD), s.Model, s.UserMsgs+s.AsstMsgs, s.ID), m.width-1))
-	foot := styleStatus.Render(fmt.Sprintf("↑/↓ scroll · t tokens (%s) · i inspect · e export · enter resume · esc back",
-		turnTokenMode(m.turnTokens)))
+	keys := fmt.Sprintf("↑/↓ scroll · t tokens (%s) · i inspect · e export · enter resume · esc back",
+		turnTokenMode(m.turnTokens))
+	if note := m.hitNote(); note != "" {
+		keys = note + " · " + keys
+	}
+	foot := styleStatus.Render(truncate(keys, m.width-1))
 	return head + "\n" + m.detail.View() + "\n" + foot
+}
+
+// hitNote reports the reader's position among the search hits. The
+// count is of occurrences in the *rendered* transcript, which can
+// differ from the list's per-file count: that one greps the raw JSONL,
+// which also holds metadata and tool arguments the reader doesn't show.
+func (m Model) hitNote() string {
+	if m.contentQuery == "" {
+		return ""
+	}
+	if len(m.detailHits) == 0 {
+		return fmt.Sprintf("%q not in the shown text", m.contentQuery)
+	}
+	return fmt.Sprintf("hit %d/%d (n/N)", m.hitCursor+1, len(m.detailHits))
 }
 
 // liveMarker returns the glyph and style for a running-session status.

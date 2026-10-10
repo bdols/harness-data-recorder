@@ -197,6 +197,57 @@ wait_for "session id" 3
 assert_present "inspect works after search" "sess-alpha"
 send Escape
 
+echo "navigating search hits in the transcript (n/N)"
+launch
+send "s"
+type_text "needle"
+send Enter
+wait_for "3 matches" 5
+send v
+# Alpha's rendered text holds three occurrences: the prompt, then two in
+# the reply (one of them capitalised, since the search is case-insensitive).
+wait_for "hit 1/3" 5
+assert_present "opening a result lands on the first hit" "hit 1/3"
+# The current hit is marked by reverse video, which only a capture that
+# keeps escapes can see.
+if "$TMUX_BIN" capture-pane -t "$SES" -p -e |
+	grep -oE "$(printf '\033')\\[[0-9;]*m" | grep -qE '(\[|;)7(;|m)'; then
+	ok "current hit is highlighted"
+else
+	bad "current hit is not highlighted"
+fi
+send n
+wait_for "hit 2/3" 3
+assert_present "n advances to the next hit" "hit 2/3"
+send n
+wait_for "hit 3/3" 3
+send n
+wait_for "hit 1/3" 3
+assert_present "n wraps at the last hit" "hit 1/3"
+send N
+wait_for "hit 3/3" 3
+assert_present "N wraps backwards to the last hit" "hit 3/3"
+send Escape
+wait_for "MODIFIED" 5
+# Re-opening starts the walk over.
+send v
+wait_for "hit 1/3" 5
+assert_present "re-opening restarts at the first hit" "hit 1/3"
+send Escape
+
+echo "a search that matches only the raw jsonl says so"
+launch
+send "s"
+# sess-alpha appears in the file's metadata, never in the rendered text.
+type_text "sess-alpha"
+send Enter
+wait_for "matches" 5
+send v
+wait_for "not in the shown text" 5
+assert_present "reader admits the match is not in the shown text" "not in the shown text"
+assert_absent "and offers no hit counter" "hit 1/"
+send Escape
+
 echo "version browser (V)"
 BK="$WORK/backups"
 rm -rf "$BK"
