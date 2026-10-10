@@ -235,17 +235,49 @@ wait_for "hit 1/3" 5
 assert_present "re-opening restarts at the first hit" "hit 1/3"
 send Escape
 
-echo "a search that matches only the raw jsonl says so"
+echo "content search vs deep search (s and S)"
 launch
+# "sess-alpha" is in the file — as the session id on every record — and
+# nowhere in the conversation. A content search must not match it: the
+# same shape made a raw grep for "human" hit nearly every real session,
+# since Claude Code stamps "origin":{"kind":"human"} on every prompt.
 send "s"
-# sess-alpha appears in the file's metadata, never in the rendered text.
 type_text "sess-alpha"
 send Enter
-wait_for "matches" 5
+# Barrier on the search readout itself: the default status line already
+# says "N sessions", so waiting on that passes before the search runs.
+wait_for "content:" 5
+assert_present "content search reports the query kind" "content:"
+assert_absent "content search ignores record metadata" "Alpha Session"
+send Escape
+wait_for "MODIFIED" 5
+
+# S reads the whole file, so the same query finds it.
+send "S"
+wait_for "deep search:" 3
+assert_present "S prompts for a deep search" "deep search:"
+type_text "sess-alpha"
+send Enter
+wait_for "deep:" 5
+assert_present "deep search reports the query kind" "deep:"
+assert_present "deep search finds the metadata match" "Alpha Session"
 send v
 wait_for "not in the shown text" 5
-assert_present "reader admits the match is not in the shown text" "not in the shown text"
+assert_present "reader says a deep hit is not in the shown text" "is in the file, not in the shown text"
 assert_absent "and offers no hit counter" "hit 1/"
+send Escape
+send Escape
+
+# A word in the conversation is found by both.
+launch
+send "S"
+type_text "needle"
+send Enter
+wait_for "deep:" 5
+assert_present "deep search also finds conversation text" "Alpha Session"
+send v
+wait_for "hit 1/" 5
+assert_present "hits are walkable after a deep search too" "hit 1/3"
 send Escape
 
 echo "version browser (V)"

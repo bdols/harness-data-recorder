@@ -46,7 +46,8 @@ The list shows two time columns: **MODIFIED** (time since the last message — t
 | `w` | switch the tmux window to the running session (if it's live and inside tmux) |
 | `t` / `T` | name the selected session's tmux window after its project / name all of them (`u` in the running view undoes it) |
 | `/` | filter (matches project, title, last prompt, branch, id) |
-| `s` | full-content search across all sessions (uses `rg` when installed, Go fallback otherwise); shows per-session match counts, `esc` clears. Opening a result jumps to the first occurrence; `n`/`N` walk the rest |
+| `s` | content search across all sessions — what the conversation said; shows per-session match counts, `esc` clears. Opening a result jumps to the first occurrence; `n`/`N` walk the rest |
+| `S` | deep search: the same query against the raw `.jsonl`, including everything never displayed (thinking, tool results, metadata) |
 | `b` | back up sessions now |
 | `m` | re-home the session into another directory (for a project that moved on disk) |
 | `x` | find & replace literal text in the session — redacting a pasted secret, or fixing a stale path |
@@ -74,13 +75,21 @@ Claude Code cleans up a session's `.jsonl` after `cleanupPeriodDays`, but a **lo
 
 `R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `csb --running` prints the same list for scripting.
 
+### Two searches: content and deep
+
+`s` searches **what the conversation said** — prompts, replies and tool-call lines, the text the reader draws. `S` searches **the whole file**: thinking blocks, tool arguments and results, `<system-reminder>` text, the contents of files Claude read, and the record envelope's own metadata. The readout names which one ran: `content:"human" · 4 sessions · 45 matches` against `deep:"human" · 25 sessions · 1452 matches`.
+
+That example is why the split exists. Claude Code stamps **every typed prompt** with `"origin":{"kind":"human"},"promptSource":"typed"` and `"turnOrigin":"human"`, so a raw grep for "human" matched **26 of 29** real sessions — on a word nobody ever wrote. The same goes for timestamps, cwds, permission modes, uuids and field names. A content search answers "where did we discuss this"; a deep search answers "where does this string exist", which is the right question for a secret you are hunting before redacting (`x`), or for something you only remember Claude *thinking*.
+
+Content search uses grep as a prefilter and then parses each surviving candidate, so it costs more — around 240ms against 8ms on a 29-session store, both well inside a keystroke. It runs asynchronously either way.
+
 ### Walking the search hits
 
-A content search (`s`) carries into the reader. Opening a result lands on the **first occurrence** rather than the top of the transcript, `n` and `N` walk forwards and backwards through the rest (wrapping at either end), and the footer keeps count: `hit 7/69 (n/N)`. Each hit is centred rather than pinned to an edge, so the surrounding turn is readable.
+A content search carries into the reader. Opening a result lands on the **first occurrence** rather than the top of the transcript, `n` and `N` walk forwards and backwards through the rest (wrapping at either end), and the footer keeps count: `hit 7/69 (n/N)`. Each hit is centred rather than pinned to an edge, so the surrounding turn is readable.
 
 Every occurrence is underlined and the current one is in reverse video — **weight and inversion, not hue**, so the marker survives any palette and reads the same under colour blindness. Occurrences, not lines, are the unit: two hits on one line are two stops.
 
-The reader's count can be **lower than the list's**. The list greps the raw `.jsonl`, which also holds metadata, tool arguments and JSON escaping; the reader counts what is actually on screen. When a session matches only in the parts the reader doesn't show, the footer says so rather than leaving you pressing `n` at nothing: `"sess-alpha" not in the shown text`.
+After a **deep** search the reader can still only walk what it draws, so the counts diverge: the footer says `"sess-alpha" is in the file, not in the shown text` rather than leaving you pressing `n` at nothing. After a content search the two counts agree by construction, with one exception — a tool-call line is truncated to the window width, so a hit past the cut is counted by the list and not by the reader.
 
 ## Exporting to Markdown
 

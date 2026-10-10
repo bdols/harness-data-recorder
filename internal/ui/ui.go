@@ -63,7 +63,7 @@ var (
 // transient status (search results, filters, errors) never hides the
 // keys that remain available — i inspect, w tmux, etc. all still work
 // while a search or filter is active.
-const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · u usage · t name win · / filter · s search · b backup · m re-home · x redact · d del · r rescan · q quit"
+const keyBar = "enter resume · v view · i inspect · V versions · e export · R running · c commands · w tmux · u usage · t name win · / filter · s search · S deep · b backup · m re-home · x redact · d del · r rescan · q quit"
 
 // Model is the top-level bubbletea model.
 type Model struct {
@@ -83,6 +83,7 @@ type Model struct {
 	// Content search (ripgrep across full session files).
 	search       textinput.Model
 	searching    bool           // input prompt active
+	searchDeep   bool           // the pending/last search reads raw jsonl
 	contentQuery string         // last executed query, "" = off
 	matches      map[string]int // per-file match counts for contentQuery
 
@@ -215,6 +216,7 @@ type switchedMsg struct {
 
 type searchedMsg struct {
 	query   string
+	deep    bool
 	matches map[string]int
 	err     error
 }
@@ -254,10 +256,14 @@ func backupCmd(root, dest string) tea.Cmd {
 	}
 }
 
-func searchCmd(root, query string) tea.Cmd {
+func searchCmd(root, query string, deep bool) tea.Cmd {
 	return func() tea.Msg {
-		matches, err := session.SearchContent(root, query)
-		return searchedMsg{query: query, matches: matches, err: err}
+		search := session.SearchContent
+		if deep {
+			search = session.SearchDeep
+		}
+		matches, err := search(root, query)
+		return searchedMsg{query: query, deep: deep, matches: matches, err: err}
 	}
 }
 
@@ -329,7 +335,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = ""
 		m.status = ""
-		m.contentQuery = msg.query
+		m.contentQuery, m.searchDeep = msg.query, msg.deep
 		m.matches = msg.matches
 		m.cursor = 0
 		m.applyFilter()
@@ -385,7 +391,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = "searching…"
-			return m, searchCmd(m.root, q)
+			return m, searchCmd(m.root, q, m.searchDeep)
 		default:
 			var cmd tea.Cmd
 			m.search, cmd = m.search.Update(msg)
@@ -602,8 +608,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filtering = true
 			m.filter.Focus()
 			return m, textinput.Blink
-		case "s":
+		case "s", "S":
+			// s reads the conversation; S reads the whole file, including
+			// everything Claude Code records that is never displayed.
+			m.searchDeep = msg.String() == "S"
 			m.searching = true
+			m.search.Prompt = "search: "
+			if m.searchDeep {
+				m.search.Prompt = "deep search: "
+			}
 			m.search.Focus()
 			return m, textinput.Blink
 		case "esc":
@@ -2104,6 +2117,9 @@ func (m Model) hitNote() string {
 		return ""
 	}
 	if len(m.detailHits) == 0 {
+		if m.searchDeep {
+			return fmt.Sprintf("%q is in the file, not in the shown text", m.contentQuery)
+		}
 		return fmt.Sprintf("%q not in the shown text", m.contentQuery)
 	}
 	return fmt.Sprintf("hit %d/%d (n/N)", m.hitCursor+1, len(m.detailHits))
@@ -2697,7 +2713,11 @@ func (m Model) statusAndHelp() (status, help string) {
 		for _, s := range m.filtered {
 			total += m.matches[s.Path]
 		}
-		status = styleStatus.Render(truncate(fmt.Sprintf(" content:%q · %d sessions · %d matches · esc clear", m.contentQuery, len(m.filtered), total), m.width-1))
+		kind := "content"
+		if m.searchDeep {
+			kind = "deep"
+		}
+		status = styleStatus.Render(truncate(fmt.Sprintf(" %s:%q · %d sessions · %d matches · esc clear", kind, m.contentQuery, len(m.filtered), total), m.width-1))
 	case m.filter.Value() != "":
 		status = styleStatus.Render(truncate(fmt.Sprintf(" filter:%q · %d sessions · esc clear", m.filter.Value(), len(m.filtered)), m.width-1))
 	default:
