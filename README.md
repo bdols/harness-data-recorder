@@ -4,6 +4,8 @@ A TUI for browsing and resuming [Claude Code](https://claude.com/claude-code) se
 
 Claude Code stores every session as a `.jsonl` file under `~/.claude/projects/<project>/<session-id>.jsonl`. Its built-in `--resume` picker only shows sessions for the current directory — this tool shows all of them, sorted by recency, with titles, message counts, and models, and resumes any of them in the right working directory.
 
+> **Not affiliated with or endorsed by Anthropic.** This is an independent tool that reads the transcript files Claude Code writes to disk. That format is undocumented and can change with any Claude Code release, so a new version may break parts of `csb` until it catches up.
+
 ## Install
 
 ```sh
@@ -178,10 +180,10 @@ Opening a transcript (`v`) annotates each assistant turn with what that call bil
 `t` cycles three ways. The default hangs a compact gauge in the **right margin**, flush to the edge and out of the way of reading:
 
 ```
-  ⚙ Bash: Find investing-related notes in vault
-  ⚙ Bash: Search vault for finance/trading notes                      ▂ 23.1k ↓348
-  ⚙ Read: /var/home/bd/obsidian/fin investing/stock trading.md
-  ⚙ Read: /var/home/bd/obsidian/fin investing/Finance MOC.md          ▅ 126.1k ↓276  ⟳
+  ⚙ Bash: List the packages in the module
+  ⚙ Bash: Run the parser tests                                        ▂ 23.1k ↓348
+  ⚙ Read: ~/code/example/internal/parse/lexer.go
+  ⚙ Read: ~/code/example/internal/parse/lexer_test.go                 ▅ 126.1k ↓276  ⟳
 ```
 
 The bar sizes the context the call carried — a separate ramp from the list's, since one turn spans tens of thousands of tokens where a whole session spans tens of millions — and `⟳` marks a cache rebuild. Press `t` again for the full footer form, `↑ 45.2k ctx · ↓ 1.2k out` plus `⟳ cache rebuilt, 382.6k re-sent`, which also breaks out thinking tokens; once more turns the annotations off. The footer names the current mode.
@@ -393,3 +395,7 @@ stateDiagram-v2
 ```
 
 `List` is the hub; `Filtering`/`Searching` are input overlays within it. `Resuming` isn't a UI mode — `tea.ExecProcess` suspends the TUI to run `claude --resume`, and `resumedMsg` returns to `List`. `SwitchTmux`/`SwitchToLive` and `Export` are side-effects that don't change the logical state.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
