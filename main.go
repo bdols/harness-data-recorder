@@ -1,5 +1,5 @@
-// claude-session-browser: a TUI for browsing and resuming Claude Code
-// sessions stored as .jsonl files under ~/.claude/projects.
+// hdr (harness data recorder): a TUI for browsing, resuming and auditing
+// Claude Code sessions stored as .jsonl files under ~/.claude/projects.
 package main
 
 import (
@@ -14,12 +14,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/bdols/claude-session-browser/internal/audit"
-	"github.com/bdols/claude-session-browser/internal/backup"
-	"github.com/bdols/claude-session-browser/internal/live"
-	"github.com/bdols/claude-session-browser/internal/rewrite"
-	"github.com/bdols/claude-session-browser/internal/session"
-	"github.com/bdols/claude-session-browser/internal/ui"
+	"github.com/bdols/harness-data-recorder/internal/audit"
+	"github.com/bdols/harness-data-recorder/internal/backup"
+	"github.com/bdols/harness-data-recorder/internal/live"
+	"github.com/bdols/harness-data-recorder/internal/rewrite"
+	"github.com/bdols/harness-data-recorder/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/ui"
 )
 
 var version = "0.2.0"
@@ -49,7 +49,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("claude-session-browser", version)
+		fmt.Println("hdr", version)
 		return
 	}
 

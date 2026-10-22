@@ -18,11 +18,11 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 
-	"github.com/bdols/claude-session-browser/internal/audit"
-	"github.com/bdols/claude-session-browser/internal/backup"
-	"github.com/bdols/claude-session-browser/internal/live"
-	"github.com/bdols/claude-session-browser/internal/rewrite"
-	"github.com/bdols/claude-session-browser/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/audit"
+	"github.com/bdols/harness-data-recorder/internal/backup"
+	"github.com/bdols/harness-data-recorder/internal/live"
+	"github.com/bdols/harness-data-recorder/internal/rewrite"
+	"github.com/bdols/harness-data-recorder/internal/session"
 )
 
 type mode int
@@ -1171,7 +1171,7 @@ func (m Model) launchClaude(s *session.Session) (tea.Model, tea.Cmd) {
 		m.err = fmt.Sprintf("cwd %s no longer exists", dir)
 		return m, nil
 	}
-	bin := os.Getenv("CSB_CLAUDE_BIN")
+	bin := os.Getenv("HDR_CLAUDE_BIN")
 	if bin == "" {
 		bin = "claude"
 	}

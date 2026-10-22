@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bdols/claude-session-browser/internal/backup"
-	"github.com/bdols/claude-session-browser/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/backup"
+	"github.com/bdols/harness-data-recorder/internal/session"
 )
 
 // writeSess writes a minimal session with one Bash tool call.
@@ -82,13 +82,13 @@ func TestCollectIncludesReapedFromBackup(t *testing.T) {
 }
 
 func bashEntry(detail string, sb session.Sandbox) Entry {
-	return Entry{Tool: "Bash", Detail: detail, Project: "csb", Model: "claude-opus-5", Sandbox: sb}
+	return Entry{Tool: "Bash", Detail: detail, Project: "hdr", Model: "claude-opus-5", Sandbox: sb}
 }
 
 // The regression this guards: a command whose text mentions the selector
 // used to match it, so running the audit polluted the audit.
 func TestMatchesSandboxSelectorIgnoresCommandText(t *testing.T) {
-	decoy := bashEntry("csb --commands sandbox:bypass | wc -l", session.SandboxDefault)
+	decoy := bashEntry("hdr --commands sandbox:bypass | wc -l", session.SandboxDefault)
 	if decoy.Matches([]string{"sandbox:bypass"}) {
 		t.Error("a command merely mentioning sandbox:bypass must not match the selector")
 	}

@@ -110,13 +110,13 @@ func TestIsClaudeProcess(t *testing.T) {
 }
 
 // TestSwitchTmux exercises the real tmux focus commands against a
-// private, throwaway tmux server (via CSB_TMUX_SOCKET) so it can never
+// private, throwaway tmux server (via HDR_TMUX_SOCKET) so it can never
 // disturb the developer's own tmux session.
 func TestSwitchTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	sock := "csb-test-" + strings.ReplaceAll(t.Name(), "/", "-")
+	sock := "hdr-test-" + strings.ReplaceAll(t.Name(), "/", "-")
 	tm := func(args ...string) *exec.Cmd {
 		return exec.Command("tmux", append([]string{"-L", sock}, args...)...)
 	}
@@ -139,7 +139,7 @@ func TestSwitchTmux(t *testing.T) {
 	}
 	target := strings.TrimSpace(string(pane0))
 
-	t.Setenv("CSB_TMUX_SOCKET", sock)
+	t.Setenv("HDR_TMUX_SOCKET", sock)
 	if err := SwitchTmux(target); err != nil {
 		t.Fatalf("SwitchTmux(%q) = %v", target, err)
 	}
@@ -314,12 +314,12 @@ func TestSlug(t *testing.T) {
 // own label beats a directory basename.
 func TestPlanRenamesPrefersSessionName(t *testing.T) {
 	sessions := map[string]Session{
-		"a": {SessionID: "a", Name: "csb", NameSource: "user", CWD: "/home/x/code/claude-session-browser",
+		"a": {SessionID: "a", Name: "hdr", NameSource: "user", CWD: "/home/x/code/harness-data-recorder",
 			TmuxPane: "%1", TmuxWindow: "0:1", TmuxLabel: "claude"},
 	}
 	plan := PlanRenames(sessions, nil, false)
-	if len(plan) != 1 || plan[0].New != "csb" {
-		t.Fatalf("plan = %+v, want one rename to \"csb\"", plan)
+	if len(plan) != 1 || plan[0].New != "hdr" {
+		t.Fatalf("plan = %+v, want one rename to \"hdr\"", plan)
 	}
 }
 
@@ -383,8 +383,8 @@ func TestScanReadsNameSource(t *testing.T) {
 	}
 }
 
-// csb's own past renames must not lock it out. rename-window turns
-// automatic-rename off, so a window csb named looks hand-named; the
+// hdr's own past renames must not lock it out. rename-window turns
+// automatic-rename off, so a window hdr named looks hand-named; the
 // @csb_named marker is what distinguishes the two.
 func TestPlanRenamesUpdatesItsOwnPreviousName(t *testing.T) {
 	sessions := map[string]Session{
@@ -394,11 +394,11 @@ func TestPlanRenamesUpdatesItsOwnPreviousName(t *testing.T) {
 	}
 	plan := PlanRenames(sessions, nil, false)
 	if len(plan) != 1 || plan[0].New != "ebooks" {
-		t.Fatalf("plan = %+v, want csb to update the window it named itself", plan)
+		t.Fatalf("plan = %+v, want hdr to update the window it named itself", plan)
 	}
 }
 
-// If the user renamed the window after csb did, the marker no longer
+// If the user renamed the window after hdr did, the marker no longer
 // matches and the hand-named guard applies again.
 func TestPlanRenamesYieldsAfterUserRenames(t *testing.T) {
 	sessions := map[string]Session{
@@ -407,7 +407,7 @@ func TestPlanRenamesYieldsAfterUserRenames(t *testing.T) {
 			TmuxLabel: "my-own-label", TmuxNamed: true, TmuxMarker: "obsidian-check-ebook"},
 	}
 	if plan := PlanRenames(sessions, nil, false); len(plan) != 0 {
-		t.Errorf("plan = %+v, want empty: the user renamed it after csb did", plan)
+		t.Errorf("plan = %+v, want empty: the user renamed it after hdr did", plan)
 	}
 	if plan := PlanRenames(sessions, nil, true); len(plan) != 1 {
 		t.Errorf("force plan = %+v, want one rename", plan)
@@ -422,31 +422,31 @@ func TestCsbOwns(t *testing.T) {
 		label, marker string
 		want          bool
 	}{
-		{"csb named it and it still holds", "csb", "csb", true},
-		{"user renamed after csb", "mine", "csb", false},
+		{"hdr named it and it still holds", "hdr", "hdr", true},
+		{"user renamed after hdr", "mine", "hdr", false},
 		{"never marked", "jetson", "", false},
 		{"empty label and marker", "", "", false},
 	}
 	for _, c := range cases {
-		got := csbOwns(Session{TmuxLabel: c.label, TmuxMarker: c.marker})
+		got := hdrOwns(Session{TmuxLabel: c.label, TmuxMarker: c.marker})
 		if got != c.want {
-			t.Errorf("%s: csbOwns(label=%q marker=%q) = %v, want %v", c.name, c.label, c.marker, got, c.want)
+			t.Errorf("%s: hdrOwns(label=%q marker=%q) = %v, want %v", c.name, c.label, c.marker, got, c.want)
 		}
 	}
 }
 
-// scan must carry the marker through from tmux, or every csb-named
+// scan must carry the marker through from tmux, or every hdr-named
 // window silently reverts to looking hand-named.
 func TestScanReadsCsbMarker(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistry(t, dir, "100.json",
 		`{"pid":100,"sessionId":"s","cwd":"/p","status":"idle","updatedAt":1}`)
 	panes := map[int]pane{
-		100: {id: "%1", pid: 100, window: "0:1", label: "csb", named: true, marker: "csb"},
+		100: {id: "%1", pid: 100, window: "0:1", label: "hdr", named: true, marker: "hdr"},
 	}
 	got := scan(dir, func(int) bool { return true }, panes)
-	if s := got["s"]; s.TmuxMarker != "csb" || !s.TmuxNamed {
-		t.Errorf("marker=%q named=%v, want csb/true", s.TmuxMarker, s.TmuxNamed)
+	if s := got["s"]; s.TmuxMarker != "hdr" || !s.TmuxNamed {
+		t.Errorf("marker=%q named=%v, want hdr/true", s.TmuxMarker, s.TmuxNamed)
 	}
 }
 
@@ -458,7 +458,7 @@ func TestRenameWindowMarkerRoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	sock := "csb-test-" + strings.ReplaceAll(t.Name(), "/", "-")
+	sock := "hdr-test-" + strings.ReplaceAll(t.Name(), "/", "-")
 	tm := func(args ...string) *exec.Cmd {
 		return exec.Command("tmux", append([]string{"-L", sock}, args...)...)
 	}
@@ -471,7 +471,7 @@ func TestRenameWindowMarkerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := strings.TrimSpace(string(out))
-	t.Setenv("CSB_TMUX_SOCKET", sock)
+	t.Setenv("HDR_TMUX_SOCKET", sock)
 
 	field := func(f string) string {
 		b, err := tm("list-panes", "-t", "t:0", "-F", f).Output()

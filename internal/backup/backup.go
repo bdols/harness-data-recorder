@@ -33,6 +33,8 @@ import (
 )
 
 // DefaultDir returns the backup destination, honoring XDG_DATA_HOME.
+// The directory keeps the tool's old name on purpose: it holds the only
+// copy of reaped sessions, and renaming it needs a migration, not an edit.
 func DefaultDir() string {
 	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
 		return filepath.Join(x, "claude-session-browser", "backups")
@@ -185,7 +187,7 @@ func updateCurrent(flat, vdir string) error {
 	if err := os.MkdirAll(filepath.Dir(flat), 0o755); err != nil {
 		return err
 	}
-	tmp := flat + ".csblink"
+	tmp := flat + ".hdrlink"
 	_ = os.Remove(tmp)
 	if err := os.Link(newest, tmp); err != nil {
 		return copyPreserving(newest, flat) // e.g. cross-device
@@ -530,7 +532,7 @@ func copyPreserving(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".csb-*")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".hdr-*")
 	if err != nil {
 		return err
 	}

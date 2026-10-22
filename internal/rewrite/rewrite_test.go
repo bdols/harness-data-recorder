@@ -10,8 +10,8 @@ import (
 
 func TestMungeDir(t *testing.T) {
 	cases := map[string]string{
-		"/var/mnt/videos/GarthMarenghi/Clips":      "-var-mnt-videos-GarthMarenghi-Clips",
-		"/var/home/bd/code/claude-session-browser": "-var-home-bd-code-claude-session-browser",
+		"/var/mnt/videos/GarthMarenghi/Clips":     "-var-mnt-videos-GarthMarenghi-Clips",
+		"/var/home/bd/code/harness-data-recorder": "-var-home-bd-code-harness-data-recorder",
 		"/tmp":                   "-tmp",
 		"/var/home/bd/.config/x": "-var-home-bd--config-x",
 	}

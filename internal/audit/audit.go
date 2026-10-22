@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bdols/claude-session-browser/internal/backup"
-	"github.com/bdols/claude-session-browser/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/backup"
+	"github.com/bdols/harness-data-recorder/internal/session"
 )
 
 // Entry is one tool call with its session/project context.
@@ -59,7 +59,7 @@ func (e Entry) SandboxLabel() string {
 //
 // The selectors have to be structured rather than folded into the
 // free-text haystack. As a substring, "sandbox:bypass" also matches any
-// command whose *text* mentions it — including csb's own audit commands,
+// command whose *text* mentions it — including hdr's own audit commands,
 // so the audit pollutes its own results as it grows — which silently
 // inflates precisely the query a compliance review depends on being
 // exact.

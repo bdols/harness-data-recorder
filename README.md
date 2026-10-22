@@ -1,32 +1,32 @@
-# claude-session-browser
+# hdr — harness data recorder
 
-A TUI for browsing and resuming [Claude Code](https://claude.com/claude-code) sessions across all your projects.
+A flight data recorder for coding-agent harnesses. `hdr` is a TUI for browsing, resuming, auditing and backing up [Claude Code](https://claude.com/claude-code) sessions across all your projects; support for other harnesses is planned.
 
 Claude Code stores every session as a `.jsonl` file under `~/.claude/projects/<project>/<session-id>.jsonl`. Its built-in `--resume` picker only shows sessions for the current directory — this tool shows all of them, sorted by recency, with titles, message counts, and models, and resumes any of them in the right working directory.
 
-> **Not affiliated with or endorsed by Anthropic.** This is an independent tool that reads the transcript files Claude Code writes to disk. That format is undocumented and can change with any Claude Code release, so a new version may break parts of `csb` until it catches up.
+> **Not affiliated with or endorsed by Anthropic.** This is an independent tool that reads the transcript files Claude Code writes to disk. That format is undocumented and can change with any Claude Code release, so a new version may break parts of `hdr` until it catches up.
 
 ## Install
 
 ```sh
-go install github.com/bdols/claude-session-browser@latest
+go install github.com/bdols/harness-data-recorder@latest
 ```
 
 or build from source:
 
 ```sh
-go build -o csb .
+go build -o hdr .
 ```
 
 ## Usage
 
 ```sh
-csb                 # launch the TUI
-csb --list          # plain-text session table to stdout
-csb --running       # list running Claude sessions (flags reaped ones) and exit
-csb --export <id>   # render a session's transcript as Markdown to stdout
-csb --commands      # audit every tool call across sessions (live + backups)
-csb --root /path    # scan an alternate projects dir (see Remote below)
+hdr                 # launch the TUI
+hdr --list          # plain-text session table to stdout
+hdr --running       # list running Claude sessions (flags reaped ones) and exit
+hdr --export <id>   # render a session's transcript as Markdown to stdout
+hdr --commands      # audit every tool call across sessions (live + backups)
+hdr --root /path    # scan an alternate projects dir (see Remote below)
 ```
 
 On terminals ≥95 columns wide the TUI shows a split view: the session list on the left and a live preview of the selected session's transcript tail on the right. Narrower terminals fall back to a full-width list.
@@ -75,7 +75,7 @@ Detection reads Claude Code's per-process registry at `~/.claude/sessions/<pid>.
 
 Claude Code cleans up a session's `.jsonl` after `cleanupPeriodDays`, but a **long-running process still holds the transcript in memory** — sending it any message rewrites the file. So a months-old running session whose file was reaped isn't lost, just invisible: no file means it never appears in the list, and if the process dies the transcript is gone for good.
 
-`R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `csb --running` prints the same list for scripting.
+`R` opens a running-sessions view listing every live Claude process with its status, PID, location (tmux window or cwd), and whether its transcript is `saved` or **`⚠ REAPED — rescue`** (reaped ones first). The main list also flags this: `⚠ N running with no saved transcript — press R`. To rescue one: `enter`/`w` to jump to its pane, send any message (e.g. "thanks") so Claude rewrites the file, then come back and `r` (rescan) + `b` (back up). `hdr --running` prints the same list for scripting.
 
 ### Two searches: content and deep
 
@@ -97,7 +97,7 @@ After a **deep** search the reader can still only walk what it draws, so the cou
 
 A session can be left a **husk** — the metadata records (`ai-title`, `mode`, `agent-name`, `cost-state`) and no conversation at all. Resuming it opens an empty session, and because the file exists, nothing flags it as lost. This happened to a forked session here: 227 records on Sep 9, a 773-byte husk by Oct 10.
 
-`csb --restore <id>` refuses to overwrite a live file by default — the backup is the past and the live file is the present, so clobbering it blind is the wrong default. But it now says which copy is actually fuller, so a husk is obvious:
+`hdr --restore <id>` refuses to overwrite a live file by default — the backup is the past and the live file is the present, so clobbering it blind is the wrong default. But it now says which copy is actually fuller, so a husk is obvious:
 
 ```
 error: session b4b99c60-… already exists at ~/.claude/projects/-var-home-bd-obsidian/b4b99c60-….jsonl
@@ -112,26 +112,26 @@ error: session b4b99c60-… already exists at ~/.claude/projects/-var-home-bd-ob
 Press `e` to export a session's transcript to a readable Markdown file (title, id, project, model, date range, then each user/assistant turn). It's written to the current directory. In the version browser, `e` exports the specific version you've selected — so you can export an older, more complete state.
 
 ```sh
-csb --export <session-id> > session.md
+hdr --export <session-id> > session.md
 ```
 
-`--export` picks the **most complete** transcript available for that id — the live file or the largest backup version — so a reaped session still exports its full history straight from backups. (This differs from Claude Code's own `/export`, which dumps only the current in-memory context — for a compacted session that's just the summary plus recent turns, not the full history that csb's backups retain.)
+`--export` picks the **most complete** transcript available for that id — the live file or the largest backup version — so a reaped session still exports its full history straight from backups. (This differs from Claude Code's own `/export`, which dumps only the current in-memory context — for a compacted session that's just the summary plus recent turns, not the full history that hdr's backups retain.)
 
 ## Command / tool audit
 
-Every command Claude runs is recorded in the transcript as a tool call, so csb can reconstruct a chronological audit of **everything Claude did** — Bash commands, file edits, reads, searches — across all your sessions. It reads from live sessions *and* the backup store, so reaped sessions are still covered.
+Every command Claude runs is recorded in the transcript as a tool call, so hdr can reconstruct a chronological audit of **everything Claude did** — Bash commands, file edits, reads, searches — across all your sessions. It reads from live sessions *and* the backup store, so reaped sessions are still covered.
 
 Press `c` in the TUI for a searchable log (newest first; `/` filters; `enter` jumps to the owning session), or use the CLI:
 
 ```sh
-csb --commands                 # full audit: TIME · PROJECT · MODEL · TOOL · SANDBOX · DETAIL
-csb --commands git commit      # filter by term(s) — matches tool, detail, project, or model
-csb --commands sandbox:bypass  # Bash commands run with dangerouslyDisableSandbox
-csb --commands sub: opus       # calls made by Opus subagents
-csb --commands rm > audit.txt  # greppable / redirectable
+hdr --commands                 # full audit: TIME · PROJECT · MODEL · TOOL · SANDBOX · DETAIL
+hdr --commands git commit      # filter by term(s) — matches tool, detail, project, or model
+hdr --commands sandbox:bypass  # Bash commands run with dangerouslyDisableSandbox
+hdr --commands sub: opus       # calls made by Opus subagents
+hdr --commands rm > audit.txt  # greppable / redirectable
 ```
 
-Terms are ANDed. `sandbox:`, `sub:` and `model:` are **selectors**, tested against that field alone; every other term is a free-text substring over tool, detail, project and model. That distinction matters: as plain substrings, a selector also matched any command whose *text* mentioned it — so the audit polluted its own results (running `csb --commands sandbox:bypass` added a row that then matched the same query), inflating exactly the number a compliance review needs to be exact. An unrecognised selector value (`sandbox:typo`) matches nothing rather than everything, so a mistyped filter fails visibly instead of looking like a clean bill of health.
+Terms are ANDed. `sandbox:`, `sub:` and `model:` are **selectors**, tested against that field alone; every other term is a free-text substring over tool, detail, project and model. That distinction matters: as plain substrings, a selector also matched any command whose *text* mentioned it — so the audit polluted its own results (running `hdr --commands sandbox:bypass` added a row that then matched the same query), inflating exactly the number a compliance review needs to be exact. An unrecognised selector value (`sandbox:typo`) matches nothing rather than everything, so a mistyped filter fails visibly instead of looking like a clean bill of health.
 
 **MODEL** is the model that issued the call (`sub:` marks calls from an Agent-tool subagent, read from the session's `subagents/` transcripts — live sessions only, since backups don't store them). **SANDBOX** is `BYPASS` when a Bash command ran with `dangerouslyDisableSandbox` (the value the tool result echoes back, so it reflects what actually took effect) and `default` otherwise. Transcripts don't record whether sandboxing was enabled, so `default` means sandboxed only in projects with `sandbox.enabled` set.
 
@@ -139,12 +139,12 @@ This is a durable, atuin-style history of Claude's actions that survives Claude 
 
 ## Naming tmux windows after their project
 
-Run several Claude sessions in tmux and every window is called `claude` or `zsh`, which tells you nothing about which is which. csb already knows the project behind each running session, so it can name the windows for you:
+Run several Claude sessions in tmux and every window is called `claude` or `zsh`, which tells you nothing about which is which. hdr already knows the project behind each running session, so it can name the windows for you:
 
 ```sh
-csb --name-windows --dry-run   # preview: WINDOW · FROM · TO
-csb --name-windows             # apply
-csb --name-windows --force     # include windows you named by hand
+hdr --name-windows --dry-run   # preview: WINDOW · FROM · TO
+hdr --name-windows             # apply
+hdr --name-windows --force     # include windows you named by hand
 ```
 
 In the TUI, `t` names the selected session's window, `T` names all of them, and `u` (in the running view) hands a window back to tmux's automatic naming.
@@ -154,19 +154,19 @@ Windows are the unit, not sessions — several Claude processes often share one 
 Two rules keep this useful rather than merely tidy:
 
 - **Names you chose yourself are left alone.** tmux records a manual rename as `automatic-rename off`, which is a reliable signal of intent — replacing a deliberate `jetson` with a generic project name is a downgrade. `--force` (or `t` on a single session, which is an explicit request) overrides it.
-- **…but csb's own renames stay updatable.** `rename-window` *also* sets `automatic-rename off`, so a window csb named is indistinguishable from one you named — which would freeze it permanently. csb therefore records the name it assigned in a `@csb_named` tmux window option: if the window still carries that name, csb may rename it again; if the name has since changed, you've taken the window over and the guard applies again. `u` clears the marker along with the flag. Windows renamed by a csb build older than this carry no marker, so one `--force` run is needed to adopt them.
-- **Ambiguous names get qualified.** Nine windows all named `obsidian` are no more informative than the `claude` they replaced, so when a project name would collide csb appends a short slug of the session's title: `obsidian-check-ebook`, `obsidian-evaluate-gemma`.
+- **…but hdr's own renames stay updatable.** `rename-window` *also* sets `automatic-rename off`, so a window hdr named is indistinguishable from one you named — which would freeze it permanently. hdr therefore records the name it assigned in a `@csb_named` tmux window option (named for the tool's former name, `csb`): if the window still carries that name, hdr may rename it again; if the name has since changed, you've taken the window over and the guard applies again. `u` clears the marker along with the flag. Windows renamed by an hdr build older than this carry no marker, so one `--force` run is needed to adopt them.
+- **Ambiguous names get qualified.** Nine windows all named `obsidian` are no more informative than the `claude` they replaced, so when a project name would collide hdr appends a short slug of the session's title: `obsidian-check-ebook`, `obsidian-evaluate-gemma`.
 
 Renaming turns tmux's `automatic-rename` off for that window, which is what makes the name stick instead of reverting to the running command; `u` / `set-window-option automatic-rename on` reverses it. Re-running is a no-op when everything is already named correctly.
 
 ## Token usage
 
-Every assistant message records what the API billed, so csb can total it per session:
+Every assistant message records what the API billed, so hdr can total it per session:
 
 ```sh
-csb --tokens                 # per session, biggest first, with a grand total
-csb --tokens obsidian        # filter by project, title or id
-csb --tokens --by-model      # same totals split by issuing model
+hdr --tokens                 # per session, biggest first, with a grand total
+hdr --tokens obsidian        # filter by project, title or id
+hdr --tokens --by-model      # same totals split by issuing model
 ```
 
 The columns stay **split rather than totalled**, because the split is the whole story. On a real set of 27 sessions, cache reads were **94% of all billed tokens** (733M of 773M) — and cache reads cost a fraction of base input. A single "tokens used" figure is dominated by the cheapest component and tells you little about either spend or context size.
@@ -215,8 +215,8 @@ Claude Code finds resumable sessions **only** in the directory derived from your
 Nothing is lost in either case; the transcript is just filed under a name that no longer matches. `m` (or `--rehome`) files it correctly:
 
 ```sh
-csb --rehome <id> --to /new/path/to/project
-csb --rehome <id> --to /new/path --adopt-config   # also carry over trust/tools/MCP settings
+hdr --rehome <id> --to /new/path/to/project
+hdr --rehome <id> --to /new/path --adopt-config   # also carry over trust/tools/MCP settings
 ```
 
 It **copies** the transcript into the project directory for the new path (the original is left untouched), rewrites every record's recorded `cwd`, and brings the project's `memory/` directory along so the resumed session hasn't forgotten anything. With `--adopt-config` it also copies the old path's entry in `~/.claude.json` — `hasTrustDialogAccepted`, `allowedTools`, MCP servers — so you aren't re-approving a project you already trusted. Only keys missing at the new path are filled in; existing values always win. (Claude Code rewrites that file itself, so prefer running this while no session in either directory is live.)
@@ -228,19 +228,19 @@ An existing transcript at the destination is never overwritten without `--force`
 `x` (or `--replace`) runs a **literal** substitution across a session's transcript — for scrubbing a credential that got pasted into a chat, or correcting a path that changed:
 
 ```sh
-csb --replace <id> --from 'sk-live-…' --to '[REDACTED]' --all-versions
+hdr --replace <id> --from 'sk-live-…' --to '[REDACTED]' --all-versions
 ```
 
 Every modified record is re-parsed as JSON before anything is written, so a replacement that would corrupt the transcript (an unescaped quote landing inside a string) fails and leaves the file alone.
 
-`--all-versions` matters for redaction: a secret scrubbed from the live file **still sits in the backup version history**, so csb's own durability would otherwise work against you. With the flag, csb rewrites every stored version and re-seals each one's filename hash to match its new content, keeping version dedup honest. The TUI has this on by default (`ctrl+a` toggles it) and reports how many files it touched. Without it, csb tells you the versions still contain the original text.
+`--all-versions` matters for redaction: a secret scrubbed from the live file **still sits in the backup version history**, so hdr's own durability would otherwise work against you. With the flag, hdr rewrites every stored version and re-seals each one's filename hash to match its new content, keeping version dedup honest. The TUI has this on by default (`ctrl+a` toggles it) and reports how many files it touched. Without it, hdr tells you the versions still contain the original text.
 
 ### Environment
 
 | Variable | Effect |
 |----------|--------|
-| `CSB_CLAUDE_BIN` | `claude` binary used for resuming (default `claude`) |
-| `CSB_TMUX_SOCKET` | tmux server socket (`tmux -L <name>`) for detection and switching; default server otherwise |
+| `HDR_CLAUDE_BIN` | `claude` binary used for resuming (default `claude`) |
+| `HDR_TMUX_SOCKET` | tmux server socket (`tmux -L <name>`) for detection and switching; default server otherwise |
 
 ## Backups
 
@@ -258,11 +258,11 @@ Layout, per session file:
 ```
 
 ```sh
-csb --backup                    # one-shot sync (for cron/systemd timers)
-csb --backup-dir /path          # alternate destination
-csb --no-auto-backup            # don't sync on TUI launch
-csb --root ~/.local/share/claude-session-browser/backups   # browse the backups themselves
-csb --restore <session-id>      # restore the most complete version so --resume works again
+hdr --backup                    # one-shot sync (for cron/systemd timers)
+hdr --backup-dir /path          # alternate destination
+hdr --no-auto-backup            # don't sync on TUI launch
+hdr --root ~/.local/share/claude-session-browser/backups   # browse the backups themselves
+hdr --restore <session-id>      # restore the most complete version so --resume works again
 ```
 
 `--restore` brings back the **most complete (largest) version**, so a later truncation can never mask the good copy, and it refuses to overwrite a session that still exists live. The inspect card (`i`) shows how many versions are stored and flags (`⚠`) when an older version holds more data than the newest — the sign of a truncated live file. Existing pre-versioning (flat) backups are migrated in place on the next sync: the old copy is seeded as version 1 before anything else is captured. You can also raise `cleanupPeriodDays` in `~/.claude/settings.json` to keep the originals longer.
@@ -286,7 +286,7 @@ There is no server component (yet). To browse sessions on a remote machine, moun
 
 ```sh
 sshfs server:.claude/projects /tmp/remote-sessions
-csb --root /tmp/remote-sessions
+hdr --root /tmp/remote-sessions
 ```
 
 Resuming a remote session locally only makes sense if the project cwd exists locally too; otherwise use the browser for reading transcripts.
@@ -303,7 +303,7 @@ go test ./...        # unit tests: parsing, backup sync/restore, search (rg + Go
 test/tui_test.sh     # end-to-end TUI tests driven through tmux (requires tmux)
 ```
 
-The Go tests build their own fixtures in temp dirs — including the running-session detection (fake registry via `CSB_SESSIONS_DIR`, injected process/pane data) and the tmux switch, which runs against a private throwaway tmux server via `CSB_TMUX_SOCKET` so it can never disturb your own session. `test/tui_test.sh` builds the binary, runs it against a throwaway fixture projects dir with `claude` stubbed via `CSB_CLAUDE_BIN`, and drives real keystrokes to assert on rendered output (split-pane preview, filter, inspect, content search, resume hand-off). Neither suite touches your real `~/.claude/projects` or tmux server.
+The Go tests build their own fixtures in temp dirs — including the running-session detection (fake registry via `HDR_SESSIONS_DIR`, injected process/pane data) and the tmux switch, which runs against a private throwaway tmux server via `HDR_TMUX_SOCKET` so it can never disturb your own session. `test/tui_test.sh` builds the binary, runs it against a throwaway fixture projects dir with `claude` stubbed via `HDR_CLAUDE_BIN`, and drives real keystrokes to assert on rendered output (split-pane preview, filter, inspect, content search, resume hand-off). Neither suite touches your real `~/.claude/projects` or tmux server.
 
 ## How it works
 

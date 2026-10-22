@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# End-to-end tests for the claude-session-browser TUI, driven through
+# End-to-end tests for the hdr TUI, driven through
 # tmux. These complement the Go unit tests (which cover parsing, backup,
 # and search logic in isolation) by exercising the actually-rendered
 # interface: the split-pane transcript preview, the metadata filter,
@@ -9,7 +9,7 @@
 #
 # The tests build the binary and run it against a throwaway fixture
 # projects dir, so they never touch your real ~/.claude/projects and are
-# deterministic. `claude` itself is stubbed via CSB_CLAUDE_BIN so the
+# deterministic. `claude` itself is stubbed via HDR_CLAUDE_BIN so the
 # resume test can assert what would have been launched without starting
 # a real session.
 #
@@ -31,10 +31,10 @@ WORK=$(mktemp -d)
 FIX="$WORK/projects"
 CWD_ALPHA="$WORK/cwd-alpha"
 CWD_BETA="$WORK/cwd-beta"
-CSB="$WORK/csb"
+HDR="$WORK/hdr"
 STUB="$WORK/fake-claude.sh"
 RESUME_LOG="$WORK/resume.log"
-SES="csb-tui-test-$$"
+SES="hdr-tui-test-$$"
 
 FAILS=0
 ok() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
@@ -117,12 +117,12 @@ wait_absent() {
 
 launch() {
 	"$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
-	# Point --backup-dir and CSB_SESSIONS_DIR at empty dirs so the suite is
+	# Point --backup-dir and HDR_SESSIONS_DIR at empty dirs so the suite is
 	# hermetic: otherwise restore-on-resume would consult the developer's
 	# real backups and live detection would pick up their real sessions.
 	mkdir -p "$WORK/empty-sessions"
 	"$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-		"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
+		"HDR_SESSIONS_DIR=$WORK/empty-sessions HDR_CLAUDE_BIN=$STUB $HDR --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
 	wait_for "sessions" 8 || echo "  (warning: TUI status line never appeared)"
 }
 
@@ -136,7 +136,7 @@ assert_absent() {
 # ---- build ------------------------------------------------------------
 
 echo "building…"
-(cd "$ROOT" && go build -o "$CSB" .) || {
+(cd "$ROOT" && go build -o "$HDR" .) || {
 	echo "build failed"
 	exit 1
 }
@@ -283,10 +283,10 @@ send Escape
 echo "version browser (V)"
 BK="$WORK/backups"
 rm -rf "$BK"
-"$CSB" --root "$FIX" --backup-dir "$BK" --backup >/dev/null
+"$HDR" --root "$FIX" --backup-dir "$BK" --backup >/dev/null
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $BK --no-auto-backup"
+	"HDR_CLAUDE_BIN=$STUB $HDR --root $FIX --backup-dir $BK --no-auto-backup"
 wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
 send V
 wait_for "RECORDS" 5
@@ -311,7 +311,7 @@ printf '{"pid":%d,"sessionId":"sess-alpha","cwd":"%s","status":"busy","name":"a"
 	"$KEEPER" "$FIX" >"$WORK/sessions/$KEEPER.json"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"CSB_SESSIONS_DIR=$WORK/sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $BK --no-auto-backup"
+	"HDR_SESSIONS_DIR=$WORK/sessions HDR_CLAUDE_BIN=$STUB $HDR --root $FIX --backup-dir $BK --no-auto-backup"
 wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
 send V
 wait_for "RECORDS" 5
@@ -325,29 +325,29 @@ rm -f "$WORK"/sessions/*.json
 
 echo "tool-call audit (--commands and c)"
 # CLI: the Bash tool call from the alpha fixture must appear.
-if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands 2>/dev/null | grep -q "echo audit-marker-xyz"; then
+if "$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands 2>/dev/null | grep -q "echo audit-marker-xyz"; then
 	ok "--commands lists the Bash tool call"
 else
 	bad "--commands missing the Bash tool call"
 fi
-if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands audit-marker 2>/dev/null | grep -q "echo audit-marker-xyz"; then
+if "$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands audit-marker 2>/dev/null | grep -q "echo audit-marker-xyz"; then
 	ok "--commands filter matches"
 else
 	bad "--commands filter found nothing"
 fi
 # Selectors must be structured, not substrings: an unknown value matches
 # nothing, and the sandbox state is not reachable through command text.
-if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:default 2>/dev/null | grep -c audit-marker-xyz)" = "1" ]; then
+if [ "$("$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:default 2>/dev/null | grep -c audit-marker-xyz)" = "1" ]; then
 	ok "--commands sandbox:default selects the Bash call"
 else
 	bad "sandbox:default did not select the Bash call"
 fi
-if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:bypass 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
+if [ "$("$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:bypass 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
 	ok "--commands sandbox:bypass excludes non-bypassed calls"
 else
 	bad "sandbox:bypass matched a call that did not bypass"
 fi
-if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:typo 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
+if [ "$("$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --commands sandbox:typo 2>/dev/null | tail -n +2 | wc -l)" = "0" ]; then
 	ok "an unrecognised selector value matches nothing"
 else
 	bad "a mistyped selector returned rows"
@@ -362,7 +362,7 @@ assert_present "audit view shows the Bash call" "audit-marker-xyz"
 
 echo "token usage (--tokens and i)"
 # The alpha fixture records 10+3 input, 5+2 output, 100 cache read.
-TOK=$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens 2>/dev/null)
+TOK=$("$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens 2>/dev/null)
 if printf '%s' "$TOK" | grep -q "Alpha Session"; then
 	ok "--tokens lists sessions"
 else
@@ -386,13 +386,13 @@ if printf '%s' "$TOK" | grep -q "cache reads are"; then
 else
 	bad "--tokens missing cache-read share"
 fi
-if "$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens --by-model 2>/dev/null | grep -q "claude-opus-4-8"; then
+if "$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens --by-model 2>/dev/null | grep -q "claude-opus-4-8"; then
 	ok "--tokens --by-model splits by issuing model"
 else
 	bad "--by-model did not list the model"
 fi
 # Filter must narrow to one session.
-if [ "$("$CSB" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens beta 2>/dev/null | grep -c "Alpha Session")" = "0" ]; then
+if [ "$("$HDR" --root "$FIX" --backup-dir "$WORK/empty-backups" --tokens beta 2>/dev/null | grep -c "Alpha Session")" = "0" ]; then
 	ok "--tokens filter excludes non-matching sessions"
 else
 	bad "--tokens filter did not narrow"
@@ -445,7 +445,7 @@ while [ $i -lt 60 ]; do
 done
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LONGROOT --backup-dir $WORK/empty-backups --no-auto-backup"
+	"HDR_SESSIONS_DIR=$WORK/empty-sessions HDR_CLAUDE_BIN=$STUB $HDR --root $LONGROOT --backup-dir $WORK/empty-backups --no-auto-backup"
 wait_for "Long Session" 8 || echo "  (warning: list never appeared)"
 send v
 wait_for "t tokens (margin)" 5
@@ -494,7 +494,7 @@ mkdir -p "$WORK/empty-sessions"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 # -c sets the working dir so the exported .md lands in the throwaway WORK.
 "$TMUX_BIN" new-session -d -s "$SES" -c "$WORK" -x 150 -y 40 \
-	"CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
+	"HDR_SESSIONS_DIR=$WORK/empty-sessions HDR_CLAUDE_BIN=$STUB $HDR --root $FIX --backup-dir $WORK/empty-backups --no-auto-backup"
 wait_for "sessions" 8 || echo "  (warning: TUI never appeared)"
 send e
 wait_for "exported to" 5
@@ -523,7 +523,7 @@ printf '{"pid":%d,"sessionId":"reapedsess","cwd":"%s","status":"idle","version":
 	>"$WORK/rsessions/$K2.json"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"HOME=$RHOME CSB_SESSIONS_DIR=$WORK/rsessions CSB_CLAUDE_BIN=$STUB $CSB --root $RHOME/.claude/projects --backup-dir $BK --no-auto-backup"
+	"HOME=$RHOME HDR_SESSIONS_DIR=$WORK/rsessions HDR_CLAUDE_BIN=$STUB $HDR --root $RHOME/.claude/projects --backup-dir $BK --no-auto-backup"
 wait_for "no saved transcript" 8 || echo "  (warning: reaped alert never appeared)"
 assert_present "main list alerts about reaped running sessions" "no saved transcript"
 # savedsess has a transcript and is running, so the main list shows its
@@ -547,10 +547,10 @@ rm -rf "$HROOT" "$HBK"
 mkdir -p "$HROOT/-proj"
 printf '{"type":"user","message":{"role":"user","content":"real work"},"timestamp":"2026-10-01T12:00:00Z","cwd":"/proj"}\n{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-10-01T12:00:01Z"}\n' \
 	>"$HROOT/-proj/husked.jsonl"
-"$CSB" --root "$HROOT" --backup-dir "$HBK" --backup >/dev/null
+"$HDR" --root "$HROOT" --backup-dir "$HBK" --backup >/dev/null
 printf '{"type":"ai-title","aiTitle":"husk","sessionId":"husked"}\n' >"$HROOT/-proj/husked.jsonl"
 
-if OUT=$("$CSB" --root "$HROOT" --backup-dir "$HBK" --restore husked 2>&1); then
+if OUT=$("$HDR" --root "$HROOT" --backup-dir "$HBK" --restore husked 2>&1); then
 	bad "--restore clobbered a live file without --force"
 else
 	case "$OUT" in
@@ -563,7 +563,7 @@ case "$OUT" in
 *) bad "--restore error does not compare record counts: $OUT" ;;
 esac
 
-"$CSB" --root "$HROOT" --backup-dir "$HBK" --restore husked --force >/dev/null 2>&1
+"$HDR" --root "$HROOT" --backup-dir "$HBK" --restore husked --force >/dev/null 2>&1
 if [ "$(wc -l <"$HROOT/-proj/husked.jsonl")" = 2 ]; then
 	ok "--force restored the full transcript"
 else
@@ -586,7 +586,7 @@ printf '{"type":"user","message":{"role":"user","content":"hi"},"cwd":"%s","time
 	"$OLDP" >>"$RH/-old-project/movedsess.jsonl"
 echo "project note" >"$RH/-old-project/memory/note.md"
 MUNGED=$(printf '%s' "$NEWP" | sed 's/[^A-Za-z0-9]/-/g')
-if "$CSB" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >"$WORK/rehome.out" 2>&1; then
+if "$HDR" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >"$WORK/rehome.out" 2>&1; then
 	ok "--rehome exits cleanly"
 else
 	bad "--rehome failed"
@@ -615,7 +615,7 @@ else
 	bad "project memory not copied"
 fi
 # A second run must refuse rather than clobber.
-if "$CSB" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >/dev/null 2>&1; then
+if "$HDR" --root "$RH" --backup-dir "$WORK/empty-backups" --rehome movedsess --to "$NEWP" >/dev/null 2>&1; then
 	bad "--rehome overwrote an existing destination"
 else
 	ok "--rehome refuses to clobber without --force"
@@ -627,8 +627,8 @@ mkdir -p "$RP/-proj"
 printf '{"type":"ai-title","aiTitle":"Leaky","sessionId":"leaky"}\n' >"$RP/-proj/leaky.jsonl"
 printf '{"type":"user","message":{"role":"user","content":"key sk-live-9999 here"},"cwd":"/proj","timestamp":"2026-05-01T10:00:00Z"}\n' \
 	>>"$RP/-proj/leaky.jsonl"
-"$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --backup >/dev/null 2>&1
-if "$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --replace leaky --from "sk-live-9999" --to "[REDACTED]" --all-versions >"$WORK/rp.out" 2>&1; then
+"$HDR" --root "$RP" --backup-dir "$WORK/rpbk" --backup >/dev/null 2>&1
+if "$HDR" --root "$RP" --backup-dir "$WORK/rpbk" --replace leaky --from "sk-live-9999" --to "[REDACTED]" --all-versions >"$WORK/rp.out" 2>&1; then
 	ok "--replace exits cleanly"
 else
 	bad "--replace failed"
@@ -647,7 +647,7 @@ else
 	ok "secret scrubbed from backup versions too"
 fi
 # The transcript must still parse: every line valid JSON.
-if "$CSB" --root "$RP" --backup-dir "$WORK/rpbk" --list 2>/dev/null | grep -q "leaky"; then
+if "$HDR" --root "$RP" --backup-dir "$WORK/rpbk" --list 2>/dev/null | grep -q "leaky"; then
 	ok "transcript still parses after redaction"
 else
 	bad "transcript broken after redaction"
@@ -672,7 +672,7 @@ echo "tmux window naming (--name-windows)"
 # A private tmux server whose pane IS the fake claude process (exec
 # replaces the shell), so the pid in the registry is the pane pid and
 # window naming has a real window to act on.
-NS="csbname$$"
+NS="hdrname$$"
 NHOME="$WORK/nhome"
 mkdir -p "$NHOME" "$WORK/nsessions" "$WORK/proj-widgets"
 cp "$(command -v sleep)" "$WORK/claude-win"
@@ -683,8 +683,8 @@ NPID=$("$TMUX_BIN" -L "$NS" list-panes -a -F '#{pane_pid}' | head -1)
 printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","version":"9.9.9","updatedAt":1}\n' \
 	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
 # Dry run must report the change without making it.
-if CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows --dry-run 2>/dev/null | grep -q "proj-widgets"; then
+if HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows --dry-run 2>/dev/null | grep -q "proj-widgets"; then
 	ok "--name-windows --dry-run previews the rename"
 else
 	bad "--name-windows --dry-run showed nothing"
@@ -694,8 +694,8 @@ if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" != "pr
 else
 	bad "dry run renamed the window"
 fi
-CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows >/dev/null 2>&1
 if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "proj-widgets" ]; then
 	ok "--name-windows renamed the window after the project"
 else
@@ -708,8 +708,8 @@ else
 	bad "automatic-rename still on; name would revert"
 fi
 # Running it again is a no-op, not churn.
-if CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows 2>/dev/null | grep -q "nothing to rename"; then
+if HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows 2>/dev/null | grep -q "nothing to rename"; then
 	ok "re-running --name-windows is a no-op"
 else
 	bad "--name-windows renamed an already-correct window"
@@ -717,52 +717,52 @@ fi
 # A name the user chose by hand must survive: tmux records that as
 # automatic-rename off, and clobbering it would be a downgrade.
 "$TMUX_BIN" -L "$NS" rename-window -t w:0 "my-own-name"
-CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows >/dev/null 2>&1
 if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "my-own-name" ]; then
 	ok "hand-named window left alone"
 else
 	bad "hand-named window was clobbered"
 fi
 # ...unless explicitly forced.
-CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows --force >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows --force >/dev/null 2>&1
 if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "proj-widgets" ]; then
 	ok "--force renames a hand-named window"
 else
 	bad "--force did not rename the hand-named window"
 fi
 
-# csb must not mistake its own past renames for the user's. rename-window
+# hdr must not mistake its own past renames for the user's. rename-window
 # turns automatic-rename off, so without the @csb_named marker every
-# window csb ever named would be permanently frozen.
+# window hdr ever named would be permanently frozen.
 MARK=$("$TMUX_BIN" -L "$NS" list-panes -a -F '#{@csb_named}' | head -1)
 if [ "$MARK" = "proj-widgets" ]; then
 	ok "rename records the @csb_named marker"
 else
 	bad "marker is '$MARK', want 'proj-widgets'"
 fi
-# Give the session a name; csb should update the window it named before,
+# Give the session a name; hdr should update the window it named before,
 # with no --force, even though automatic-rename is off.
 printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","name":"widgets","nameSource":"user","version":"9.9.9","updatedAt":2}\n' \
 	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
-CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows >/dev/null 2>&1
 if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "widgets" ]; then
-	ok "csb updates a window it named itself, without --force"
+	ok "hdr updates a window it named itself, without --force"
 else
-	bad "csb refused to update its own window (got '$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)')"
+	bad "hdr refused to update its own window (got '$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)')"
 fi
-# But once the user renames it, csb must yield again.
+# But once the user renames it, hdr must yield again.
 "$TMUX_BIN" -L "$NS" rename-window -t w:0 "user-owns-this"
 printf '{"pid":%d,"sessionId":"winsess","cwd":"%s","status":"idle","name":"changed-again","nameSource":"user","version":"9.9.9","updatedAt":3}\n' \
 	"$NPID" "$WORK/proj-widgets" >"$WORK/nsessions/$NPID.json"
-CSB_TMUX_SOCKET="$NS" CSB_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
-	"$CSB" --name-windows >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS" HDR_SESSIONS_DIR="$WORK/nsessions" HOME="$NHOME" \
+	"$HDR" --name-windows >/dev/null 2>&1
 if [ "$("$TMUX_BIN" -L "$NS" list-windows -F '#{window_name}' | head -1)" = "user-owns-this" ]; then
-	ok "csb yields after the user renames its window"
+	ok "hdr yields after the user renames its window"
 else
-	bad "csb clobbered a window the user renamed after it"
+	bad "hdr clobbered a window the user renamed after it"
 fi
 "$TMUX_BIN" -L "$NS" kill-server 2>/dev/null
 rm -rf "$NHOME" "$WORK/nsessions"
@@ -770,7 +770,7 @@ rm -rf "$NHOME" "$WORK/nsessions"
 echo "session-name window naming (--resume name)"
 # A session named with --resume must name its window after that name, not
 # the cwd basename — this is what separates several windows in one project.
-NS2="csbname2$$"
+NS2="hdrname2$$"
 mkdir -p "$WORK/n2sessions" "$WORK/proj-shared"
 cp "$(command -v sleep)" "$WORK/claude-win2"
 "$TMUX_BIN" -L "$NS2" kill-server 2>/dev/null
@@ -779,8 +779,8 @@ sleep 0.5
 N2PID=$("$TMUX_BIN" -L "$NS2" list-panes -a -F '#{pane_pid}' | head -1)
 printf '{"pid":%d,"sessionId":"named1","cwd":"%s","status":"idle","name":"ebooks","nameSource":"user","version":"9.9.9","updatedAt":1}\n' \
 	"$N2PID" "$WORK/proj-shared" >"$WORK/n2sessions/$N2PID.json"
-CSB_TMUX_SOCKET="$NS2" CSB_SESSIONS_DIR="$WORK/n2sessions" HOME="$NHOME" \
-	"$CSB" --name-windows >/dev/null 2>&1
+HDR_TMUX_SOCKET="$NS2" HDR_SESSIONS_DIR="$WORK/n2sessions" HOME="$NHOME" \
+	"$HDR" --name-windows >/dev/null 2>&1
 W2=$("$TMUX_BIN" -L "$NS2" list-windows -F '#{window_name}' | head -1)
 if [ "$W2" = "ebooks" ]; then
 	ok "window named after the session name, not the cwd"
@@ -796,7 +796,7 @@ printf '{"sessionId":"named1","type":"ai-title","aiTitle":"Named Session","cwd":
 	>"$LHOME/.claude/projects/-proj/named1.jsonl"
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"HOME=$LHOME CSB_TMUX_SOCKET=$NS2 CSB_SESSIONS_DIR=$WORK/n2sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
+	"HOME=$LHOME HDR_TMUX_SOCKET=$NS2 HDR_SESSIONS_DIR=$WORK/n2sessions HDR_CLAUDE_BIN=$STUB $HDR --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
 wait_for "Named Session" 8 || echo "  (warning: list never appeared)"
 assert_present "list shows the tmux window id for a live session" "w:0"
 send q
@@ -804,7 +804,7 @@ send q
 # assertion above can't pass on some incidental "w:0" elsewhere on screen.
 "$TMUX_BIN" kill-session -t "$SES" 2>/dev/null
 "$TMUX_BIN" new-session -d -s "$SES" -x 150 -y 40 \
-	"HOME=$LHOME CSB_TMUX_SOCKET=$NS2 CSB_SESSIONS_DIR=$WORK/empty-sessions CSB_CLAUDE_BIN=$STUB $CSB --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
+	"HOME=$LHOME HDR_TMUX_SOCKET=$NS2 HDR_SESSIONS_DIR=$WORK/empty-sessions HDR_CLAUDE_BIN=$STUB $HDR --root $LHOME/.claude/projects --backup-dir $WORK/empty-backups --no-auto-backup"
 wait_for "Named Session" 8 || echo "  (warning: list never appeared)"
 assert_absent "no window id when nothing is live" "w:0"
 send q

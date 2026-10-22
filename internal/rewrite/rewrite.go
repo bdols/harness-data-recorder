@@ -275,7 +275,7 @@ func Replace(path, from, to string) (ReplaceResult, error) {
 // writeAtomic writes data to path via a temp file in the same directory,
 // so a crash mid-write can never leave a half-written transcript.
 func writeAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".csbtmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".hdrtmp")
 	if err != nil {
 		return err
 	}

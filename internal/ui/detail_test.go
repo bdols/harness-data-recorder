@@ -9,7 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/bdols/claude-session-browser/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/session"
 )
 
 // writeTranscript builds a transcript long enough to scroll, where each

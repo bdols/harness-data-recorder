@@ -1,4 +1,4 @@
-module github.com/bdols/claude-session-browser
+module github.com/bdols/harness-data-recorder
 
 go 1.26
 

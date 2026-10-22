@@ -40,7 +40,7 @@ type Session struct {
 	TmuxWindow string // "session:window", e.g. "0:5" — for display
 	TmuxLabel  string // tmux window name — for display
 	TmuxNamed  bool   // window name was set by hand, not by tmux
-	TmuxMarker string // name csb last assigned to this window (@csb_named)
+	TmuxMarker string // name hdr last assigned to this window (@csb_named)
 }
 
 // registryEntry is the on-disk shape of ~/.claude/sessions/<pid>.json.
@@ -56,9 +56,9 @@ type registryEntry struct {
 }
 
 // registryDir returns ~/.claude/sessions, overridable via
-// CSB_SESSIONS_DIR (used by tests).
+// HDR_SESSIONS_DIR (used by tests).
 func registryDir() string {
-	if d := os.Getenv("CSB_SESSIONS_DIR"); d != "" {
+	if d := os.Getenv("HDR_SESSIONS_DIR"); d != "" {
 		return d
 	}
 	home, err := os.UserHomeDir()
@@ -69,10 +69,10 @@ func registryDir() string {
 }
 
 // tmuxCmd builds a tmux invocation, targeting a private server socket
-// when CSB_TMUX_SOCKET is set. That env var lets the browser (and the
+// when HDR_TMUX_SOCKET is set. That env var lets the browser (and the
 // test suite) address a specific tmux server instead of the default.
 func tmuxCmd(args ...string) *exec.Cmd {
-	if sock := os.Getenv("CSB_TMUX_SOCKET"); sock != "" {
+	if sock := os.Getenv("HDR_TMUX_SOCKET"); sock != "" {
 		args = append([]string{"-L", sock}, args...)
 	}
 	return exec.Command("tmux", args...)
@@ -144,7 +144,7 @@ type pane struct {
 	window string
 	label  string
 	named  bool   // window was renamed by hand (automatic-rename off)
-	marker string // @csb_named: the name csb last gave this window
+	marker string // @csb_named: the name hdr last gave this window
 }
 
 // tmuxPanes lists every tmux pane keyed by its pane pid (the shell), or
@@ -166,7 +166,7 @@ func tmuxPanes() map[int]pane {
 			continue
 		}
 		// automatic-rename off means someone named this window by hand —
-		// though that "someone" may have been csb, which marker records.
+		// though that "someone" may have been hdr, which marker records.
 		named := len(f) > 4 && f[4] == "off"
 		marker := ""
 		if len(f) > 5 {
@@ -245,8 +245,8 @@ type Rename struct {
 //   - Windows you named yourself are left alone unless force is set. tmux
 //     records that as automatic-rename off, which is a reliable signal of
 //     intent — clobbering a hand-picked "jetson" with a generic project
-//     name is a downgrade, not an improvement. Windows csb named itself
-//     are exempt from that guard (see csbOwns), or its own past renames
+//     name is a downgrade, not an improvement. Windows hdr named itself
+//     are exempt from that guard (see hdrOwns), or its own past renames
 //     would lock it out of ever improving them.
 //   - Names that would collide are disambiguated using labels (session id
 //     to a short title), because several sessions in one project produce
@@ -269,7 +269,7 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 		if s.TmuxWindow == "" || s.TmuxPane == "" {
 			continue
 		}
-		if s.TmuxNamed && !force && !csbOwns(s) {
+		if s.TmuxNamed && !force && !hdrOwns(s) {
 			continue // deliberately named by hand, and not by us
 		}
 		ordered = append(ordered, s)
@@ -344,16 +344,16 @@ func PlanRenames(sessions map[string]Session, labels map[string]string, force bo
 	return out
 }
 
-// csbOwns reports whether this window's current name is one csb gave it
+// hdrOwns reports whether this window's current name is one hdr gave it
 // and nobody has changed since.
 //
-// rename-window turns automatic-rename off, so a window csb renamed looks
+// rename-window turns automatic-rename off, so a window hdr renamed looks
 // exactly like one the user named by hand. The @csb_named marker breaks
-// that tie: it holds the name csb last assigned, so if the window still
-// carries that name, csb may update it. If the name has since diverged
+// that tie: it holds the name hdr last assigned, so if the window still
+// carries that name, hdr may update it. If the name has since diverged
 // the user has taken the window over, and the hand-named guard applies
 // again.
-func csbOwns(s Session) bool {
+func hdrOwns(s Session) bool {
 	return s.TmuxMarker != "" && s.TmuxMarker == s.TmuxLabel
 }
 
@@ -426,8 +426,9 @@ func RenameWindow(pane, name string) error {
 	}
 	// Record what we named it. rename-window turns automatic-rename off,
 	// which is indistinguishable from the user naming the window by hand;
-	// without this marker csb would mistake its own past work for the
-	// user's and refuse to ever update the window again.
+	// without this marker hdr would mistake its own past work for the
+	// user's and refuse to ever update the window again. The option keeps
+	// its pre-rename "csb" spelling: running windows already carry it.
 	_ = tmuxCmd("set-option", "-w", "-t", pane, "@csb_named", name).Run()
 	return nil
 }

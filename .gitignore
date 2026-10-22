@@ -1,2 +1,5 @@
+/harness-data-recorder
+/hdr
+# binaries built before the rename
 /claude-session-browser
 /csb

@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/bdols/claude-session-browser/internal/session"
+	"github.com/bdols/harness-data-recorder/internal/session"
 )
 
 // The ramp has to be logarithmic: real sessions span 75K to 350M billed
