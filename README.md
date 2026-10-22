@@ -2,6 +2,10 @@
 
 A flight data recorder for coding-agent harnesses. `hdr` is a TUI for browsing, resuming, auditing and backing up [Claude Code](https://claude.com/claude-code) sessions across all your projects; support for other harnesses is planned.
 
+![hdr's session list: sessions from several projects with token gauges on the left, and a transcript preview of the selected session on the right](docs/screenshot.png)
+
+<sub>Sample data; the projects and conversations are invented.</sub>
+
 Claude Code stores every session as a `.jsonl` file under `~/.claude/projects/<project>/<session-id>.jsonl`. Its built-in `--resume` picker only shows sessions for the current directory — this tool shows all of them, sorted by recency, with titles, message counts, and models, and resumes any of them in the right working directory.
 
 > **Not affiliated with or endorsed by Anthropic.** This is an independent tool that reads the transcript files Claude Code writes to disk. That format is undocumented and can change with any Claude Code release, so a new version may break parts of `hdr` until it catches up.
